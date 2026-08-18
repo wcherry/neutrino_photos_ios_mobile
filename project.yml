@@ -1,0 +1,103 @@
+name: NeutrinoPhotos
+packages:
+  swift-sodium:
+    url: https://github.com/jedisct1/swift-sodium
+    from: "0.9.1"
+options:
+  bundleIdPrefix: com.neutrino
+  deploymentTarget:
+    iOS: "16.0"
+  xcodeVersion: "16"
+
+targets:
+  NeutrinoPhotos:
+    type: application
+    platform: iOS
+    sources:
+      - path: NeutrinoPhotos
+    dependencies:
+      # XChaCha20-Poly1305 secretstream and `crypto_box_seal` — the same primitives the web
+      # app encrypts an upload with, so a photo taken here opens there and vice versa.
+      - package: swift-sodium
+        product: Sodium
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.neutrino.photos
+        MARKETING_VERSION: "1.0.0"
+        CURRENT_PROJECT_VERSION: "1"
+        SWIFT_VERSION: "5.0"
+        IPHONEOS_DEPLOYMENT_TARGET: "16.0"
+        DEVELOPMENT_TEAM: "46KWJJ63FU"
+        CODE_SIGN_STYLE: Automatic
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+    entitlements:
+      path: NeutrinoPhotos/NeutrinoPhotos.entitlements
+      properties:
+        # Universal Links: `https://www.getneutrino.app/open/photo/<id>` should open here rather
+        # than in Safari. Both host spellings are claimed so a link pasted without the "www."
+        # still resolves. Which *paths* reach this app is decided by the apple-app-site-association
+        # document served from the domain — see `deploy/apple-app-site-association` in the Drive
+        # repository — not by this list. The app ignores inbound links until FeatureFlags.appLinks
+        # is turned on and a router exists to handle them.
+        com.apple.developer.associated-domains:
+          - applinks:www.getneutrino.app
+          - applinks:getneutrino.app
+    info:
+      path: NeutrinoPhotos/Info.plist
+      properties:
+        CFBundleName: Neutrino Photos
+        CFBundleDisplayName: Neutrino Photos
+        # Without these, xcodegen writes literal "1.0"/"1" into Info.plist and the
+        # MARKETING_VERSION / CURRENT_PROJECT_VERSION build settings are ignored.
+        CFBundleShortVersionString: "$(MARKETING_VERSION)"
+        CFBundleVersion: "$(CURRENT_PROJECT_VERSION)"
+        # actool writes only the *nested* CFBundleIcons > CFBundlePrimaryIcon >
+        # CFBundleIconName. The top-level key is normally added by Xcode's Info.plist
+        # generation, which this target doesn't use (it has an explicit Info.plist), so declare
+        # it here — App Store Connect rejects the upload with error 90713 without it.
+        CFBundleIconName: AppIcon
+        UILaunchScreen: {}
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationPortrait
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
+        UISupportedInterfaceOrientations~ipad:
+          - UIInterfaceOrientationPortrait
+          - UIInterfaceOrientationPortraitUpsideDown
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
+        # Import runs through SwiftUI's `PhotosPicker`, which selects out of process and hands
+        # back only what the user picked — that needs no photo-library authorization. This string
+        # covers the *other* direction: saving a photo back to the device's library from the
+        # viewer.
+        NSPhotoLibraryAddUsageDescription: "Neutrino Photos needs permission to save a photo back to your device's photo library."
+        NSAppTransportSecurity:
+          NSAllowsArbitraryLoads: true
+        CFBundleDocumentTypes:
+          - CFBundleTypeName: Neutrino Photos Key File
+            CFBundleTypeRole: Viewer
+            LSHandlerRank: Alternate
+            LSItemContentTypes:
+              - public.json
+        UTImportedTypeDeclarations:
+          - UTTypeIdentifier: com.neutrino.photos.keyfile
+            UTTypeConformsTo:
+              - public.json
+            UTTypeDescription: Neutrino Photos Key File
+            UTTypeTagSpecification:
+              public.filename-extension:
+                - json
+
+  NeutrinoPhotosTests:
+    type: bundle.unit-test
+    platform: iOS
+    sources:
+      - path: NeutrinoPhotosTests
+    dependencies:
+      - target: NeutrinoPhotos
+    settings:
+      base:
+        SWIFT_VERSION: "5.0"
+        IPHONEOS_DEPLOYMENT_TARGET: "16.0"
+        GENERATE_INFOPLIST_FILE: YES
+        SWIFT_STRICT_CONCURRENCY: minimal

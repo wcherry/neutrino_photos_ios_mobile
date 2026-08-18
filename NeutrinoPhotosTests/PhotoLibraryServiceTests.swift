@@ -1,0 +1,201 @@
+import XCTest
+@testable import NeutrinoPhotos
+
+// MARK: - PhotoLibraryServiceTests
+
+@MainActor
+final class PhotoLibraryServiceTests: XCTestCase {
+
+    private var sut: PhotoLibraryService!
+
+    override func setUp() {
+        super.setUp()
+        MockURLProtocol.reset()
+        TestServer.use()
+        TestTokens.install()
+        sut = PhotoLibraryService(api: APIClient(session: MockURLProtocol.makeSession()))
+    }
+
+    override func tearDown() {
+        MockURLProtocol.reset()
+        TestTokens.remove()
+        TestServer.reset()
+        sut = nil
+        super.tearDown()
+    }
+
+    // MARK: - Loading
+
+    func testLoadDecodesTheListing() async {
+        MockURLProtocol.respond(data: Fixture.listingJSON([
+            Fixture.photoJSON(id: "a", fileID: "file-a", thumbnail: "AAAA"),
+            Fixture.photoJSON(id: "b", fileID: "file-b", isStarred: true),
+        ]))
+
+        await sut.load()
+
+        XCTAssertEqual(sut.allItems.count, 2)
+        XCTAssertEqual(sut.allItems.first?.fileID, "file-a")
+        XCTAssertEqual(sut.allItems.first?.thumbnailBase64, "AAAA")
+        XCTAssertEqual(sut.favorites.map(\.id), ["b"])
+        XCTAssertNil(sut.error)
+        XCTAssertNotNil(sut.lastLoadedAt)
+    }
+
+    func testLoadAsksForArchivedItemsToo() async {
+        MockURLProtocol.respond(data: Fixture.listingJSON([]))
+
+        await sut.load()
+
+        let query = MockURLProtocol.request { $0.url?.path.hasSuffix("/photos") == true }?.url?.query
+        // The server's parameter is misnamed: it means "include archived", and fetching everything
+        // once is what makes the Archive view and the Show Archived toggle free.
+        XCTAssertEqual(query, "archivedOnly=true")
+    }
+
+    func testLoadSendsTheBearerToken() async {
+        MockURLProtocol.respond(data: Fixture.listingJSON([]))
+
+        await sut.load()
+
+        let request = MockURLProtocol.request { $0.url?.path.contains("/photos") == true }
+        XCTAssertEqual(request?.value(forHTTPHeaderField: "Authorization"),
+                       "Bearer \(TestTokens.defaultAccessToken)")
+    }
+
+    func testServerErrorSurfacesWithoutClearingTheLibrary() async {
+        MockURLProtocol.respond(data: Fixture.listingJSON([Fixture.photoJSON()]))
+        await sut.load()
+        XCTAssertEqual(sut.allItems.count, 1)
+
+        MockURLProtocol.respond(json: "{}", statusCode: 500)
+        await sut.load()
+
+        XCTAssertEqual(sut.allItems.count, 1, "a failed refresh must not empty a browsable library")
+        XCTAssertNotNil(sut.error)
+    }
+
+    // MARK: - Filtering
+
+    func testArchivedItemsAreHiddenFromTheTimelineUnlessAskedFor() async {
+        MockURLProtocol.respond(data: Fixture.listingJSON([
+            Fixture.photoJSON(id: "live"),
+            Fixture.photoJSON(id: "filed", isArchived: true),
+        ]))
+
+        await sut.load()
+
+        XCTAssertEqual(sut.timeline(showingArchived: false).map(\.id), ["live"])
+        XCTAssertEqual(Set(sut.timeline(showingArchived: true).map(\.id)), ["live", "filed"])
+        XCTAssertEqual(sut.archived.map(\.id), ["filed"])
+    }
+
+    func testTimelineIsNewestFirst() async {
+        let older = Date(timeIntervalSince1970: 1_600_000_000)
+        let newer = Date(timeIntervalSince1970: 1_700_000_000)
+        MockURLProtocol.respond(data: Fixture.listingJSON([
+            Fixture.photoJSON(id: "older", captureDate: older),
+            Fixture.photoJSON(id: "newer", captureDate: newer),
+        ]))
+
+        await sut.load()
+
+        XCTAssertEqual(sut.timeline(showingArchived: false).map(\.id), ["newer", "older"])
+    }
+
+    // MARK: - Registration
+
+    func testRegisterSendsTheCaptureDateInTheServersFormat() async throws {
+        let taken = Date(timeIntervalSince1970: 1_700_000_000)
+        MockURLProtocol.respond(json: Fixture.photoJSON(id: "new", fileID: "file-new"), statusCode: 201)
+
+        let item = try await sut.register(fileID: "file-new", captureDate: taken)
+
+        XCTAssertEqual(item.id, "new")
+        XCTAssertEqual(sut.allItems.first?.id, "new")
+
+        let body = try XCTUnwrap(MockURLProtocol.body(forPathContaining: "/photos"))
+        let json = try XCTUnwrap(JSONSerialization.jsonObject(with: body) as? [String: Any])
+        XCTAssertEqual(json["fileId"] as? String, "file-new")
+        // `chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%dT%H:%M:%S")` accepts exactly this and
+        // nothing with a zone or a fraction — an ISO 8601 string would be dropped on the floor.
+        XCTAssertEqual(json["captureDate"] as? String, "2023-11-14T22:13:20")
+    }
+
+    func testRegisterWithoutACaptureDateOmitsTheField() async throws {
+        MockURLProtocol.respond(json: Fixture.photoJSON(), statusCode: 201)
+
+        _ = try await sut.register(fileID: "file-1", captureDate: nil)
+
+        let body = try XCTUnwrap(MockURLProtocol.body(forPathContaining: "/photos"))
+        let json = try XCTUnwrap(JSONSerialization.jsonObject(with: body) as? [String: Any])
+        XCTAssertEqual(json["fileId"] as? String, "file-1")
+        // `JSONEncoder` drops a nil optional rather than writing null, and serde reads a missing
+        // `Option<String>` as `None` — so an item with no EXIF date registers cleanly and the
+        // server files it under its upload time, which is what `timelineDate` falls back to.
+        XCTAssertNil(json["captureDate"])
+    }
+
+    // MARK: - Duplicate detection
+
+    func testContainsFileMatchesOnTheDriveFileID() async {
+        MockURLProtocol.respond(data: Fixture.listingJSON([Fixture.photoJSON(fileID: "file-a")]))
+        await sut.load()
+
+        XCTAssertTrue(sut.containsFile(id: "file-a"))
+        XCTAssertFalse(sut.containsFile(id: "file-b"))
+    }
+
+    // MARK: - Mutations
+
+    func testStarringIsOptimisticAndRollsBackOnFailure() async {
+        MockURLProtocol.respond(data: Fixture.listingJSON([Fixture.photoJSON(id: "a")]))
+        await sut.load()
+
+        MockURLProtocol.respond(json: "{}", statusCode: 500)
+        sut.setStarred(id: "a", isStarred: true)
+        XCTAssertTrue(sut.allItems[0].isStarred, "the flag should flip before the round trip")
+
+        await settle()
+        XCTAssertFalse(sut.allItems[0].isStarred, "a refused change must not stay on screen")
+        XCTAssertNotNil(sut.error)
+    }
+
+    func testTrashMovesTheItemAndRestorePutsItBack() async {
+        MockURLProtocol.respond(data: Fixture.listingJSON([Fixture.photoJSON(id: "a")]))
+        await sut.load()
+
+        MockURLProtocol.respond(json: "", statusCode: 204)
+        sut.trash(id: "a")
+        XCTAssertTrue(sut.allItems.isEmpty)
+        XCTAssertEqual(sut.trashItems.map(\.id), ["a"])
+        await settle()
+
+        MockURLProtocol.respond(json: Fixture.photoJSON(id: "a"))
+        sut.restore(id: "a")
+        await settle()
+        XCTAssertEqual(sut.allItems.map(\.id), ["a"])
+        XCTAssertTrue(sut.trashItems.isEmpty)
+    }
+
+    func testEmptyTrashRestoresTheListWhenTheServerRefuses() async {
+        MockURLProtocol.respond(data: Fixture.listingJSON([Fixture.photoJSON(id: "gone")]))
+        await sut.loadTrash()
+        XCTAssertEqual(sut.trashItems.count, 1)
+
+        MockURLProtocol.respond(json: "{}", statusCode: 500)
+        sut.emptyTrash()
+        await settle()
+
+        XCTAssertEqual(sut.trashItems.count, 1)
+        XCTAssertNotNil(sut.error)
+    }
+
+    // MARK: - Helpers
+
+    /// Lets the detached `Task` inside an optimistic mutation finish.
+    private func settle() async {
+        for _ in 0..<20 { await Task.yield() }
+        try? await Task.sleep(nanoseconds: 50_000_000)
+    }
+}
