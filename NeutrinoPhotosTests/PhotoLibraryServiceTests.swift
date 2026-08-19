@@ -229,6 +229,115 @@ final class PhotoLibraryServiceTests: XCTestCase {
         XCTAssertNotNil(sut.error)
     }
 
+    // MARK: - Metadata
+
+    func testMetadataIsAttachedLocallyAndPublishedToTheWorkerEndpoint() async throws {
+        MockURLProtocol.respond(data: Fixture.listingJSON([Fixture.photoJSON(id: "a")]))
+        await sut.load()
+
+        MockURLProtocol.respond(json: "", statusCode: 204)
+        await sut.setMetadata(
+            MediaMetadata(width: 4032, height: 3024,
+                          exif: MediaExif(make: "Apple", gpsLatitude: 51.5, gpsLongitude: 0.12)),
+            forPhoto: "a", publishingLocation: true)
+
+        XCTAssertEqual(sut.item(id: "a")?.metadata?.width, 4032)
+
+        let request = try XCTUnwrap(MockURLProtocol.request { $0.httpMethod == "PUT" })
+        // A worker endpoint, and the only way an end-to-end encrypted photograph's EXIF can ever
+        // reach the server: what it receives is ciphertext and the key never leaves the device.
+        XCTAssertEqual(request.url?.path, "/api/v1/photos/a/metadata")
+
+        let body = try XCTUnwrap(MockURLProtocol.body(forPathContaining: "/metadata"))
+        let sent = try JSONDecoder().decode(MediaMetadata.self, from: body)
+        XCTAssertEqual(sent.exif?.gpsLatitude ?? 0, 51.5, accuracy: 0.001)
+    }
+
+    func testLocationIsHeldBackFromTheServerButKeptOnTheDevice() async throws {
+        MockURLProtocol.respond(data: Fixture.listingJSON([Fixture.photoJSON(id: "a")]))
+        await sut.load()
+
+        MockURLProtocol.respond(json: "", statusCode: 204)
+        await sut.setMetadata(
+            MediaMetadata(width: 4032,
+                          exif: MediaExif(make: "Apple", gpsLatitude: 51.5, gpsLongitude: 0.12)),
+            forPhoto: "a", publishingLocation: false)
+
+        // Locally complete — the info panel shows a location the moment the import finishes.
+        XCTAssertEqual(sut.item(id: "a")?.metadata?.exif?.gpsLatitude ?? 0, 51.5, accuracy: 0.001)
+
+        // And nothing that says where anybody was left the device.
+        let body = try XCTUnwrap(MockURLProtocol.body(forPathContaining: "/metadata"))
+        let sent = try JSONDecoder().decode(MediaMetadata.self, from: body)
+        XCTAssertNil(sent.exif?.gpsLatitude)
+        XCTAssertNil(sent.exif?.gpsLongitude)
+        XCTAssertEqual(sent.exif?.make, "Apple", "only the coordinates are withheld")
+        XCTAssertFalse(String(decoding: body, as: UTF8.self).contains("51.5"),
+                       "the number must not survive anywhere in the payload")
+    }
+
+    func testARefreshDoesNotBlankALocationTheServerWasNeverGiven() async {
+        MockURLProtocol.respond(data: Fixture.listingJSON([Fixture.photoJSON(id: "a")]))
+        await sut.load()
+        MockURLProtocol.respond(json: "", statusCode: 204)
+        await sut.setMetadata(MediaMetadata(exif: MediaExif(gpsLatitude: 51.5, gpsLongitude: 0.12)),
+                              forPhoto: "a", publishingLocation: false)
+
+        // The listing comes back exactly as it went out: metadata null, because the coordinates
+        // were never published. Without the merge, a pull to refresh silently empties the info
+        // panel of every photograph the user chose to keep private.
+        MockURLProtocol.respond(data: Fixture.listingJSON([Fixture.photoJSON(id: "a")]))
+        await sut.load()
+
+        XCTAssertEqual(sut.item(id: "a")?.metadata?.exif?.gpsLatitude ?? 0, 51.5, accuracy: 0.001)
+    }
+
+    func testAnEmptyRecordIsNeitherStoredNorSent() async {
+        MockURLProtocol.respond(data: Fixture.listingJSON([Fixture.photoJSON(id: "a")]))
+        await sut.load()
+        let before = MockURLProtocol.requestCount
+
+        await sut.setMetadata(MediaMetadata(), forPhoto: "a", publishingLocation: true)
+
+        XCTAssertEqual(MockURLProtocol.requestCount, before)
+        XCTAssertNil(sut.item(id: "a")?.metadata)
+    }
+
+    func testFavouritingAnItemDoesNotBlankTheMetadataJustAttachedToIt() async {
+        // Importing a favourited photograph fires two writes at once: a PATCH setting the star and
+        // a PUT attaching the metadata. The PATCH response carries `metadata: null` — the server
+        // has not been told yet — so assigning it wholesale means whichever lands second wins, and
+        // half the time that is the one that erases the record the other just wrote.
+        MockURLProtocol.respond(data: Fixture.listingJSON([Fixture.photoJSON(id: "a")]))
+        await sut.load()
+        MockURLProtocol.respond(json: "", statusCode: 204)
+        await sut.setMetadata(MediaMetadata(width: 4032,
+                                            device: MediaDeviceFacts(isLivePhoto: true)),
+                              forPhoto: "a", publishingLocation: true)
+
+        MockURLProtocol.respond(json: Fixture.photoJSON(id: "a", isStarred: true))
+        sut.setStarred(id: "a", isStarred: true)
+        await settle()
+
+        XCTAssertEqual(sut.item(id: "a")?.isStarred, true)
+        XCTAssertEqual(sut.item(id: "a")?.metadata?.width, 4032)
+        XCTAssertTrue(sut.item(id: "a")?.isLivePhoto ?? false)
+    }
+
+    func testAFailedPublishDoesNotUndoTheLocalRecord() async {
+        MockURLProtocol.respond(data: Fixture.listingJSON([Fixture.photoJSON(id: "a")]))
+        await sut.load()
+
+        MockURLProtocol.respond(json: "{}", statusCode: 500)
+        await sut.setMetadata(MediaMetadata(width: 4032), forPhoto: "a", publishingLocation: true)
+
+        // The photograph is uploaded and registered by the time this runs. Failing it over its
+        // index entry — or worse, rolling the local copy back — trades the thing that matters for
+        // the thing that does not.
+        XCTAssertEqual(sut.item(id: "a")?.metadata?.width, 4032)
+        XCTAssertNil(sut.error, "an index write is not worth an error banner over the timeline")
+    }
+
     // MARK: - Helpers
 
     /// Lets the detached `Task` inside an optimistic mutation finish.

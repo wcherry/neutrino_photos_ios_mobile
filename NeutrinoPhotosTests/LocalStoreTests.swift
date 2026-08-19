@@ -86,6 +86,27 @@ final class LocalStoreTests: XCTestCase {
                        + "photograph that forgot its own camera")
     }
 
+    func testTheDeviceFactsAndTheLensSurviveTheRoundTripToo() async throws {
+        // Added by Epic 5 to an existing JSON column, so the migration is "none" — which is only
+        // true as long as the encoder and decoder agree about the new keys. A Live Photo whose
+        // `liveVideoFileID` did not persist is one whose motion nothing can ever find again.
+        let store = try makeStore()
+        let metadata = MediaMetadata(
+            width: 4032, height: 3024,
+            exif: MediaExif(make: "Apple", lensModel: "iPhone 15 Pro back camera 6.765mm f/1.78"),
+            device: MediaDeviceFacts(localIdentifier: "ABCD-1234/L0/001", isLivePhoto: true,
+                                     isRAW: false, subtypes: ["live", "hdr"],
+                                     liveVideoFileID: "video-1"))
+
+        try await store.save(Fixture.item(metadata: metadata))
+        let stored = try await store.libraryItems()
+        let restored = try XCTUnwrap(stored.first)
+
+        XCTAssertEqual(restored.metadata, metadata)
+        XCTAssertTrue(restored.isLivePhoto)
+        XCTAssertEqual(restored.liveVideoFileID, "video-1")
+    }
+
     func testTheTimelineComesBackNewestFirst() async throws {
         let store = try makeStore()
         let old = Fixture.item(id: "old", captureDate: Date(timeIntervalSince1970: 1_000_000))

@@ -17,6 +17,7 @@ struct LibraryView: View {
     @EnvironmentObject private var vault: KeyVaultService
     /// Held only to hand on to the viewer — see the `fullScreenCover` below.
     @EnvironmentObject private var thumbnails: ThumbnailCache
+    @EnvironmentObject private var deviceLibrary: DevicePhotoLibrary
 
     /// What the picker handed back. Cleared as soon as the import starts so picking the same
     /// photographs twice in a row still fires — an unchanged selection is not a changed binding.
@@ -94,6 +95,7 @@ struct LibraryView: View {
             // inherits the presenting view's environment.
             PhotoDetailView(items: cache.items, initialID: start.id)
                 .environmentObject(thumbnails)
+                .environmentObject(deviceLibrary)
         }
         .sheet(isPresented: $showsUnlock) {
             VaultUnlockView()

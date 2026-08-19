@@ -80,6 +80,17 @@ targets:
         # covers the *other* direction: saving a photo back to the device's library from the
         # viewer.
         NSPhotoLibraryAddUsageDescription: "Neutrino Photos needs permission to save a photo back to your device's photo library."
+        # Read access, which is optional and offered rather than demanded — see
+        # `DevicePhotoLibrary`. It buys the things a picked item's bytes cannot carry: the capture
+        # date of a screenshot, a favorite flag, a Live Photo's paired video, and the RAW file a
+        # camera wrote rather than the JPEG the picker renders from it. It is also what Epic 6's
+        # full-library import and Epic 7's automatic backup will need. Requesting it without this
+        # string is a crash, not a denial.
+        NSPhotoLibraryUsageDescription: "Neutrino Photos reads your photo library so imported photos keep their original dates, locations, favorites, Live Photo motion, and RAW originals."
+        # Suppresses the recurring system alert that offers to widen a limited-access selection.
+        # The app drives that prompt itself, from Settings › Photo Library › Select More Photos,
+        # so without this the user gets both — one they asked for and one they did not.
+        PHPhotoLibraryPreventAutomaticLimitedAccessAlert: true
         NSAppTransportSecurity:
           NSAllowsArbitraryLoads: true
         CFBundleDocumentTypes:

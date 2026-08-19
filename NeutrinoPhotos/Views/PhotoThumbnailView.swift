@@ -84,6 +84,15 @@ struct PhotoThumbnailView: View {
                 if item.kind == .video {
                     Image(systemName: "video.fill")
                 }
+                // Stored, not rendered: the motion is in the account and a press-and-hold does not
+                // play it yet. The badge is still worth drawing — it is how somebody can tell that
+                // importing a Live Photo kept the half of it a grid cannot show.
+                if item.isLivePhoto {
+                    Image(systemName: "livephoto")
+                }
+                if item.isRAW {
+                    Image(systemName: "camera.aperture")
+                }
                 if item.isStarred {
                     Image(systemName: "heart.fill")
                 }

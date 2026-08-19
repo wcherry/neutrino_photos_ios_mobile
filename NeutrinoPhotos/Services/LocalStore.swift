@@ -106,6 +106,8 @@ actor LocalStore {
         static let renditionsFolderID = "renditions.folderID"
         /// When the rendition index was last read from Drive.
         static let renditionsSyncedAt = "renditions.syncedAt"
+        /// The Drive folder holding the encrypted paired videos of imported Live Photos.
+        static let livePhotosFolderID = "livePhotos.folderID"
     }
 
     // MARK: - Private

@@ -58,6 +58,23 @@ final class PhotosDriveService: ObservableObject {
     /// deserves to be able to tell what it is, and deleting it costs them nothing but a re-render.
     static let renditionsFolderName = "Photo Previews"
 
+    /// The Drive folder holding the paired videos of imported Live Photos.
+    ///
+    /// A subfolder for the same reason previews get one, and for one more. A Live Photo's motion is
+    /// a MOV, and a MOV in the Drive root is a *video* to `type=video` listings — so filing it there
+    /// would put a two-second clip of somebody's shoes in the timeline beside the photograph it
+    /// belongs to. Here it is invisible to both root-scoped listings and reachable by name.
+    static let livePhotosFolderName = "Live Photos"
+
+    /// The name a Live Photo's paired video is stored under.
+    ///
+    /// Unlike a rendition's name this is not an index — the file id travels in the photo record's
+    /// metadata (``MediaDeviceFacts/liveVideoFileID``), so nothing has to parse it back. It exists
+    /// so somebody browsing this folder in Drive can tell which photograph a clip belongs to.
+    static func livePhotoVideoName(forOriginal fileID: String) -> String {
+        "\(fileID).live.mov"
+    }
+
     // MARK: - Dependencies
 
     private let api: APIClient
@@ -72,8 +89,9 @@ final class PhotosDriveService: ObservableObject {
     /// the conversion strategy unchanged, so this spelling reads both.
     private static let decoder = DriveDate.makeDecoder(convertFromSnakeCase: true)
 
-    /// Resolved once per launch. The folder does not move, and finding it is a listing.
-    private var cachedRenditionsFolderID: String?
+    /// Resolved once per launch, keyed by the meta key each folder is remembered under. The folders
+    /// do not move, and finding one is a listing.
+    private var cachedFolderIDs: [String: String] = [:]
 
     // MARK: - Init
 
@@ -166,27 +184,49 @@ final class PhotosDriveService: ObservableObject {
     /// rather than an error. The id *is* cached — in memory and in ``LocalStore`` — because the
     /// resolution is a listing and an upload should not pay for it every time.
     func renditionsFolderID(creatingIfNeeded: Bool = true) async throws -> String? {
-        if let cachedRenditionsFolderID { return cachedRenditionsFolderID }
-        if let stored = await store?.string(forKey: LocalStore.MetaKey.renditionsFolderID) {
-            cachedRenditionsFolderID = stored
+        try await folderID(named: Self.renditionsFolderName,
+                           rememberedAs: LocalStore.MetaKey.renditionsFolderID,
+                           creatingIfNeeded: creatingIfNeeded)
+    }
+
+    /// The Live Photos folder, creating it if this account has none yet. Same contract as
+    /// ``renditionsFolderID(creatingIfNeeded:)`` — see ``livePhotosFolderName`` for why it is not
+    /// the root.
+    func livePhotosFolderID(creatingIfNeeded: Bool = true) async throws -> String? {
+        try await folderID(named: Self.livePhotosFolderName,
+                           rememberedAs: LocalStore.MetaKey.livePhotosFolderID,
+                           creatingIfNeeded: creatingIfNeeded)
+    }
+
+    /// Finds one of this app's own Drive folders by name, creating it if asked to.
+    ///
+    /// By name rather than by a stored id wherever possible: an id cached on one device is
+    /// meaningless on another, and a user who deleted the folder in Drive should get a new one
+    /// rather than an error. The id *is* cached — in memory and in ``LocalStore`` — because the
+    /// resolution is a listing and an upload should not pay for one every time.
+    private func folderID(named name: String, rememberedAs key: String,
+                          creatingIfNeeded: Bool) async throws -> String? {
+        if let cached = cachedFolderIDs[key] { return cached }
+        if let stored = await store?.string(forKey: key) {
+            cachedFolderIDs[key] = stored
             return stored
         }
 
         let root = try driveRootID()
         let contents: APIFolderContents = try await api.get("/api/v1/drive/folders/\(root)",
                                                             decoder: Self.decoder)
-        if let existing = contents.folders.first(where: { $0.name == Self.renditionsFolderName }) {
-            await rememberRenditionsFolder(existing.id)
+        if let existing = contents.folders.first(where: { $0.name == name }) {
+            await rememberFolder(existing.id, as: key)
             return existing.id
         }
         guard creatingIfNeeded else { return nil }
 
         let created: DriveFolder = try await api.post(
             "/api/v1/drive/folders",
-            body: APICreateFolderRequest(name: Self.renditionsFolderName, parentId: nil),
+            body: APICreateFolderRequest(name: name, parentId: nil),
             decoder: Self.decoder)
-        logger.debug("created the renditions folder: \(created.id, privacy: .public)")
-        await rememberRenditionsFolder(created.id)
+        logger.debug("created the \(name, privacy: .public) folder: \(created.id, privacy: .public)")
+        await rememberFolder(created.id, as: key)
         return created.id
     }
 
@@ -223,9 +263,9 @@ final class PhotosDriveService: ObservableObject {
         }
     }
 
-    private func rememberRenditionsFolder(_ id: String) async {
-        cachedRenditionsFolderID = id
-        try? await store?.setString(id, forKey: LocalStore.MetaKey.renditionsFolderID)
+    private func rememberFolder(_ id: String, as key: String) async {
+        cachedFolderIDs[key] = id
+        try? await store?.setString(id, forKey: key)
     }
 
     // MARK: - Root

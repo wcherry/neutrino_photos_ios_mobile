@@ -1,6 +1,8 @@
 import CryptoKit
 import Foundation
+import ImageIO
 import UIKit
+import UniformTypeIdentifiers
 import XCTest
 @testable import NeutrinoPhotos
 
@@ -253,6 +255,91 @@ enum TestImages {
             context.fill(CGRect(x: 0, y: 0, width: size / 2, height: size / 2))
         }
         return image.jpegData(compressionQuality: quality) ?? Data()
+    }
+
+    /// The same picture with real EXIF, TIFF, and GPS blocks written into it.
+    ///
+    /// Written through `CGImageDestination` rather than hand-assembled, so what the extractor reads
+    /// back is a genuine JPEG APP1 segment laid out by the same framework a camera's file would be
+    /// parsed with. A fixture that faked the dictionary would assert that ImageIO can round-trip a
+    /// dictionary, which is not the thing under test.
+    ///
+    /// - Parameters:
+    ///   - latitude: the *magnitude*, as EXIF stores it. The hemisphere is `latitudeRef`, which is
+    ///     the half a naive reader drops — see `MediaMetadataExtractor.coordinate(from:)`.
+    static func jpegWithMetadata(size: CGFloat = 64,
+                                 make: String? = "Apple",
+                                 model: String? = "iPhone 15 Pro",
+                                 lens: String? = "iPhone 15 Pro back triple camera 6.765mm f/1.78",
+                                 exposureTime: Double? = 1.0 / 120,
+                                 fNumber: Double? = 1.78,
+                                 iso: Int? = 200,
+                                 focalLength: Double? = 6.765,
+                                 dateTimeOriginal: String? = "2024:06:15 14:25:36",
+                                 latitude: Double? = nil, latitudeRef: String = "N",
+                                 longitude: Double? = nil, longitudeRef: String = "E") -> Data {
+        guard let source = CGImageSourceCreateWithData(jpeg(size: size) as CFData, nil),
+              let image = CGImageSourceCreateImageAtIndex(source, 0, nil) else { return Data() }
+
+        var exif: [CFString: Any] = [:]
+        if let exposureTime { exif[kCGImagePropertyExifExposureTime] = exposureTime }
+        if let fNumber { exif[kCGImagePropertyExifFNumber] = fNumber }
+        if let iso { exif[kCGImagePropertyExifISOSpeedRatings] = [iso] }
+        if let focalLength { exif[kCGImagePropertyExifFocalLength] = focalLength }
+        if let dateTimeOriginal { exif[kCGImagePropertyExifDateTimeOriginal] = dateTimeOriginal }
+        if let lens { exif[kCGImagePropertyExifLensModel] = lens }
+
+        var tiff: [CFString: Any] = [:]
+        if let make { tiff[kCGImagePropertyTIFFMake] = make }
+        if let model { tiff[kCGImagePropertyTIFFModel] = model }
+
+        var gps: [CFString: Any] = [:]
+        if let latitude {
+            gps[kCGImagePropertyGPSLatitude] = latitude
+            gps[kCGImagePropertyGPSLatitudeRef] = latitudeRef
+        }
+        if let longitude {
+            gps[kCGImagePropertyGPSLongitude] = longitude
+            gps[kCGImagePropertyGPSLongitudeRef] = longitudeRef
+        }
+
+        var properties: [CFString: Any] = [:]
+        if !exif.isEmpty { properties[kCGImagePropertyExifDictionary] = exif }
+        if !tiff.isEmpty { properties[kCGImagePropertyTIFFDictionary] = tiff }
+        if !gps.isEmpty { properties[kCGImagePropertyGPSDictionary] = gps }
+
+        let output = NSMutableData()
+        guard let destination = CGImageDestinationCreateWithData(
+            output, UTType.jpeg.identifier as CFString, 1, nil) else { return Data() }
+        CGImageDestinationAddImage(destination, image, properties as CFDictionary)
+        guard CGImageDestinationFinalize(destination) else { return Data() }
+        return output as Data
+    }
+}
+
+// MARK: - DeviceAsset fixture
+
+extension DeviceAsset {
+
+    /// One `PHAsset`'s worth of facts, without a photo library.
+    ///
+    /// `PHAsset` cannot be constructed outside the Photos framework and a simulator has no library
+    /// worth fetching from, so everything downstream of ``DevicePhotoLibrary`` is written against
+    /// this value type rather than against the framework — which is the reason `DeviceAsset` exists
+    /// at all.
+    static func fixture(localIdentifier: String = "ABCD-1234/L0/001",
+                        creationDate: Date? = Date(timeIntervalSince1970: 1_600_000_000),
+                        coordinate: (latitude: Double, longitude: Double)? = nil,
+                        isFavorite: Bool = false,
+                        isLivePhoto: Bool = false,
+                        isRAW: Bool = false,
+                        subtypes: [String] = [],
+                        pixelWidth: Int? = 4032,
+                        pixelHeight: Int? = 3024) -> DeviceAsset {
+        DeviceAsset(localIdentifier: localIdentifier, creationDate: creationDate,
+                    coordinate: coordinate, isFavorite: isFavorite, isLivePhoto: isLivePhoto,
+                    isRAW: isRAW, subtypes: subtypes,
+                    pixelWidth: pixelWidth, pixelHeight: pixelHeight)
     }
 }
 

@@ -35,6 +35,8 @@ its own Settings > Encryption page, chosen in the app or simply tapped in Files.
 | Viewer | Full screen, progressive load (thumbnail → preview → original on zoom), pinch and double-tap zoom to 10×, clamped pan, swipe between items, info panel | COMPLETE |
 | Video | Playback of the decrypted original, streamed to disk rather than held | COMPLETE |
 | Import | Multi-select from the system picker, HEIC→JPEG, EXIF capture date, thumbnail, upload progress, cancel, duplicate skip | COMPLETE |
+| Photo library | Optional `PHPhotoLibrary` access: real capture dates, favorites, coordinates, Live Photo motion, RAW originals, save back to the device | COMPLETE |
+| Metadata | Dimensions, camera, lens, exposure, coordinates — extracted on device and published, with location held back by default | COMPLETE |
 | Media pipeline | Rendition ladder, encrypted preview beside each original, capped and evicted caches of decrypted media, SQLite library index | COMPLETE |
 | Favorites / Archive / Trash | Star, archive, delete, restore, empty | COMPLETE |
 | Albums | List, create, rename, delete, add a photo | PARTIAL — see below |
@@ -46,7 +48,10 @@ the other three under the user's thumb.
 
 `FeatureFlags` is the honest list of what is *not* here yet: automatic backup, offline mode, search,
 places, people, memories, editing, sharing, and Universal Links. Each is a flag set to `false`
-rather than a half-built screen.
+rather than a half-built screen. One flag is `true` and still worth naming: `deviceLibraryAccess`
+covers everything that talks to `PHPhotoLibrary`, and it is separate from `importFromPhotos` because
+it is the only thing in this app that asks for a permission the user can refuse — a build with it
+off is a working app that never shows a photo-library prompt.
 
 ## Architecture
 
@@ -70,6 +75,9 @@ NeutrinoPhotosApp        composition root — every service constructed once, in
 ├── ThumbnailCache       the grid's bitmaps: NSCache over that same DiskCache
 ├── LocalStore           SQLite — the timeline before the network answers, and the rendition index
 ├── PhotoImportService   picker → prepare → upload → register, one item at a time
+│   ├── ImagePreparation what the picker hands over, turned into what Drive should store
+│   └── MediaMetadataEx… dimensions, camera, exposure, coordinates — read off the plaintext
+├── DevicePhotoLibrary   the device's own library: what Apple Photos knows, and saving back to it
 ├── NetworkMonitor       connectivity and whether the path is metered
 ├── AppSettings          preferences, in UserDefaults
 └── TimelineCache        the grouped timeline, rebuilt only when the library or the density changes
@@ -143,6 +151,54 @@ instruction that actually applies ("unlock" for an account with a vault, "import
 The one case worth shouting about is a key from a *different* account, left behind by signing out and
 into another. Unnoticed, that presents as every photograph failing to decrypt one at a time;
 `KeyVaultService` compares the stored public key against the vault's and says so instead.
+
+### The picker needs no permission; the library adds what it cannot give
+
+`PhotosPicker` runs out of process and hands back only the items the user chose, so importing has
+never needed a photo-library prompt and the app never sees the rest of the roll. That stays the
+default. But a picked item is *bytes*, and a photo library is more than bytes:
+
+| Needs `PHPhotoLibrary` | Why the picker cannot give it |
+|---|---|
+| The real capture date | a screenshot or an edited export has no EXIF date; without this it files itself under today |
+| Favourite status | a flag on the library's record, not on the file |
+| Live Photo motion | the paired video is a second `PHAssetResource` that nothing about the still refers to |
+| The RAW original | the picker renders a compatible JPEG from a DNG rather than handing over the DNG |
+| Coordinates for an edited export | editors drop the GPS block; Apple Photos keeps its own copy |
+| Full-library and automatic import | there is no picker — the library has to be enumerated (Epics 6 and 7) |
+
+So access is **offered rather than demanded**, from Settings › This Device's Photos. Every one of
+those degrades rather than breaks, and *Limited* is a working state over fewer items rather than a
+failure — it is also the only state with a way to widen itself, which is why the recurring system
+alert is suppressed and the app drives that prompt itself. *Restricted* is kept apart from *Denied*
+because sending somebody to Settings to find a switch a Screen Time or MDM profile removed is worse
+than saying so.
+
+A Live Photo's motion goes up encrypted into a `Live Photos` Drive folder, for the mirror of the
+reason previews get one: a MOV in the Drive root is a *video* to the root-scoped `type=video`
+listing, so filing it there would put a two-second clip beside the photograph in the timeline. Its
+file id travels in the photo record's metadata, so another device learns of it from the library
+listing rather than by going looking. Saving such an item back to Apple Photos writes both
+resources, so what comes out is a Live Photo rather than a still and a stray clip.
+
+### Metadata is read here, because it cannot be read anywhere else
+
+Neutrino has a metadata worker that reads dimensions and EXIF off an uploaded file, and for a file
+uploaded in the clear that is the right place for it. Nothing this app uploads is in the clear: what
+reaches the server is ciphertext and the key never leaves the phone. So the extraction happens on
+the device, in the seconds between the picker handing a picture over and the upload sealing it, and
+`PUT /api/v1/photos/{id}/metadata` — a worker endpoint taking an opaque JSON blob — is where it
+goes. Without that, `metadata` is nil forever for every item this app imports, and the Info sheet
+has nothing to show but a file name.
+
+**Location is the one field held back.** The photograph is end-to-end encrypted; its index is not,
+because the server sorts and searches it — so publishing coordinates hands Neutrino a list of where
+somebody has been, next to a library it otherwise cannot open. That is a real trade and it belongs
+to the user, so `Settings › Privacy › Include location in cloud metadata` defaults to **off**.
+Nothing is lost locally either way: the coordinates are extracted and kept in `LocalStore`, the Info
+sheet shows them, and a refresh merges them back over a listing that came home without them. What
+publishing buys is the same location on the user's other devices, and the Places view and map search
+that will read `GET /api/v1/photos/map`.
 
 ### Capture dates
 
@@ -264,9 +320,17 @@ carries `applinks` only. Until it does, the assertion fails with a domain error 
 falls back to the password, which is why a passkey is offered beside the other methods and never
 instead of them.
 
-**No automatic backup.** `PhotosPicker` selects out of process, which is why the app needs no
-photo-library permission and never sees the rest of the roll. Watching for new photographs needs
-`PHPhotoLibrary`, its permission prompt, and `BGTaskScheduler` — that is `FeatureFlags.automaticBackup`.
+**No automatic or full-library import.** Photo-library access is in — it is what an import reads
+capture dates, favourites, Live Photo motion, and RAW originals through — but nothing *enumerates*
+the library yet. Importing is still what you pick in the picker. Moving a whole camera roll across
+once, with a pause/resume queue and duplicate detection, is Epic 6; watching for new photographs
+with `PHPhotoLibraryChangeObserver` and `BGTaskScheduler` is `FeatureFlags.automaticBackup`.
+
+**Live Photos and RAW are stored, not rendered.** A Live Photo's paired video is uploaded, indexed,
+and restorable to Apple Photos as a Live Photo; the viewer does not play it in place, and the grid
+draws a badge rather than a press-and-hold. A DNG is stored as the camera wrote it and opens through
+ImageIO like any other picture. Rendering both properly — along with bursts and panoramas, which are
+detected and recorded now — is v1.1's Epic 16.
 
 **No offline mode.** The device's copy of the library is a cache, not a replica. A cold launch with
 no signal draws the timeline it drew last time and opens anything still in the media cache — but a
@@ -286,11 +350,22 @@ xcodebuild test -project NeutrinoPhotos.xcodeproj -scheme NeutrinoPhotos \
   -destination "platform=iOS Simulator,name=iPhone 17 Pro,OS=latest"
 ```
 
-219 tests. HTTP is exercised end to end against `MockURLProtocol` — real requests, real decoding, real
+306 tests. HTTP is exercised end to end against `MockURLProtocol` — real requests, real decoding, real
 status handling — rather than behind a protocol seam. The crypto is *not* mocked: `TestKeys` installs
 a genuine X25519 pair, so the seal / unseal / secretstream round trip is asserted for what it is.
 The caches and the database are real too, in a temporary directory per test — a cache that is stubbed
-out cannot be shown to serve a second read, which is the only thing a cache is for.
+out cannot be shown to serve a second read, which is the only thing a cache is for. Nor is the image
+data: `TestImages.jpegWithMetadata` writes real EXIF, TIFF, and GPS blocks with
+`CGImageDestination`, because a hand-built dictionary would assert only that ImageIO can round-trip
+a `CFDictionary` — and the hemisphere-ref bug that puts Santiago in Boston shows up only against a
+real APP1 segment.
+
+`PHAsset` cannot be constructed and a simulator has no camera roll, so nothing downstream of the
+Photos framework is tested through it. That is what `DeviceAsset` is for: a plain value holding
+everything the importer needs from an asset, so the extraction, merging, redaction, and publishing
+are all assertable without a photo library. `DevicePhotoLibrary` itself is covered for what it
+*decides* — the authorization mapping, and that constructing it prompts for nothing, which is the
+one thing that would otherwise put a permission alert in front of every user on first launch.
 
 The pipeline's own assertion is that an uploaded original comes back byte for byte: the bytes go out
 through the multipart upload, are pulled back out of the captured request body exactly as the server

@@ -37,6 +37,7 @@ struct MediaCollectionView: View {
     @EnvironmentObject private var library: PhotoLibraryService
     /// Held only to hand on to the viewer, which opens on a cell's cover thumbnail.
     @EnvironmentObject private var thumbnails: ThumbnailCache
+    @EnvironmentObject private var deviceLibrary: DevicePhotoLibrary
 
     @State private var viewerStart: MediaItem?
     @State private var showsEmptyConfirmation = false
@@ -79,6 +80,7 @@ struct MediaCollectionView: View {
         .fullScreenCover(item: $viewerStart) { start in
             PhotoDetailView(items: items, initialID: start.id)
                 .environmentObject(thumbnails)
+                .environmentObject(deviceLibrary)
         }
     }
 

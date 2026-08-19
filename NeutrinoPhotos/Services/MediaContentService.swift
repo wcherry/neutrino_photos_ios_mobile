@@ -420,6 +420,7 @@ final class MediaContentService: ObservableObject {
     /// manual verification exists to catch the loss of.
     @discardableResult
     func upload(fileURL: URL, fileName: String, mimeType: String, thumbnailBase64: String?,
+                folderID: String? = nil,
                 onProgress: (@MainActor (Double) -> Void)? = nil) async throws -> String {
         let size = (try? FileManager.default.attributesOfItem(atPath: fileURL.path)[.size] as? Int64)
             .flatMap { $0 } ?? 0
@@ -452,6 +453,7 @@ final class MediaContentService: ObservableObject {
 
         var form = MultipartFormBody()
         form.appendField(name: "encrypted_metadata", value: encryptedMetadata)
+        form.appendField(name: "folder_id", value: folderID)
         form.appendField(name: "thumbnail_b64", value: thumbnailBase64)
         try form.write(to: bodyURL,
                        filePart: .init(name: "file", fileName: fileName, mimeType: mimeType),
@@ -513,6 +515,54 @@ final class MediaContentService: ObservableObject {
         } catch {
             logger.error("preview rendition failed for \(fileID, privacy: .public): \(error, privacy: .public)")
         }
+    }
+
+    // MARK: - Live Photos
+
+    /// Uploads a Live Photo's paired video into the account's Live Photos folder, encrypted like
+    /// everything else, and answers the Drive file id it landed under.
+    ///
+    /// Answers nil rather than throwing when there is nowhere to put it — no Drive service injected,
+    /// or a folder that could not be resolved. A Live Photo whose motion did not upload is still a
+    /// photograph; the still is already safe by the time this runs, and the record simply carries no
+    /// ``MediaDeviceFacts/liveVideoFileID``.
+    ///
+    /// Not registered as a photo, on purpose. The clip is half of an item the library already has,
+    /// and registering it would put two entries in the timeline for one thing the user photographed.
+    func uploadLivePhotoVideo(forOriginal fileID: String, from url: URL) async throws -> String? {
+        guard let drive else { return nil }
+        guard let folderID = try await drive.livePhotosFolderID() else { return nil }
+
+        let name = PhotosDriveService.livePhotoVideoName(forOriginal: fileID)
+        // Through the streaming path even though a Live Photo's motion is a couple of seconds:
+        // it is a video, the path is the one that handles videos, and "small enough today" is not
+        // a property worth writing a second code path around.
+        let videoFileID = try await upload(fileURL: url, fileName: name,
+                                            mimeType: "video/quicktime", thumbnailBase64: nil,
+                                            folderID: folderID)
+        logger.debug("live photo motion stored for \(fileID, privacy: .public)")
+        return videoFileID
+    }
+
+    /// A local file holding the decrypted paired video of a Live Photo.
+    ///
+    /// What "stored now, rendered in v1.1" cashes out to: the motion is in the account and this is
+    /// how it comes back — today so that Save to Device can put a real Live Photo into Apple Photos,
+    /// and later so the viewer can play it in place.
+    func livePhotoVideoURL(for item: MediaItem) async throws -> URL {
+        guard let videoFileID = item.liveVideoFileID else {
+            throw MediaContentError.undecodable
+        }
+        let key = "\(videoFileID).mov"
+        if let cached = originals.url(forKey: key) { return cached }
+
+        // Deliberately the small-file path: a paired video is a few seconds at capture resolution,
+        // which is megabytes rather than the gigabytes the streaming path exists for.
+        let data = try await downloadSmallFile(id: videoFileID)
+        guard let url = originals.store(data, forKey: key) else {
+            throw MediaContentError.cacheUnavailable
+        }
+        return url
     }
 
     /// Keeps what the device already had, so the photograph just imported opens without a download.

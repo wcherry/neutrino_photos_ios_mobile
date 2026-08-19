@@ -13,6 +13,7 @@ struct SettingsView: View {
     @EnvironmentObject private var monitor: NetworkMonitor
     @EnvironmentObject private var vault: KeyVaultService
     @EnvironmentObject private var drive: PhotosDriveService
+    @EnvironmentObject private var deviceLibrary: DevicePhotoLibrary
 
     @State private var deviceName = DeviceIdentity.deviceName
     @State private var showsSignOutConfirmation = false
@@ -24,6 +25,10 @@ struct SettingsView: View {
         List {
             librarySection
             uploadsSection
+            if FeatureFlags.deviceLibraryAccess {
+                deviceLibrarySection
+            }
+            privacySection
             encryptionSection
             storageSection
             accountSection
@@ -90,6 +95,53 @@ struct SettingsView: View {
     private var connectionDescription: String {
         guard monitor.isOnline else { return "Offline" }
         return monitor.isExpensive ? "Cellular" : "Wi-Fi"
+    }
+
+    // MARK: - Device photo library
+
+    private var deviceLibrarySection: some View {
+        Section {
+            NavigationLink {
+                PhotoAccessView()
+            } label: {
+                LabeledContent("Photo library access", value: deviceLibrary.access.displayName)
+            }
+            Toggle("Keep Live Photo motion", isOn: $settings.importsLivePhotoMotion)
+                .disabled(!deviceLibrary.access.isUsable)
+        } header: {
+            Text("This Device's Photos")
+        } footer: {
+            Text("""
+                 Importing needs no permission — the photo picker runs outside the app. Access adds \
+                 what the picker can't hand over: the real capture date, favorites, Live Photo \
+                 motion, and RAW originals.
+                 """)
+        }
+    }
+
+    // MARK: - Privacy
+
+    /// What leaves the device that is not the photograph.
+    ///
+    /// Worth its own section rather than a line in Uploads: the picture is end-to-end encrypted and
+    /// the server cannot read a pixel of it, so the metadata index is the only thing about somebody's
+    /// library that Neutrino *can* see. Saying so, and letting the user draw the line, is the whole
+    /// point of the section.
+    private var privacySection: some View {
+        Section {
+            Toggle("Include location in cloud metadata", isOn: $settings.publishesLocationMetadata)
+        } header: {
+            Text("Privacy")
+        } footer: {
+            Text("""
+                 Your photos are encrypted before they leave this device and stay unreadable to \
+                 Neutrino. Their index — size, camera, exposure, dates — is not encrypted, because \
+                 the server sorts and searches it. Coordinates are held back from that index unless \
+                 you turn this on. Either way this device keeps them, so the info panel shows a \
+                 location; turning it on is what will make Places and map search work, and what \
+                 puts a record of where you've been on the server.
+                 """)
+        }
     }
 
     // MARK: - Encryption
@@ -212,6 +264,7 @@ private struct RoadmapView: View {
 
     private let planned: [(String, Bool)] = [
         ("Local cache and library index", FeatureFlags.mediaPipeline),
+        ("Photo library integration", FeatureFlags.deviceLibraryAccess),
         ("Automatic backup", FeatureFlags.automaticBackup),
         ("Offline browsing", FeatureFlags.offlineMode),
         ("Search", FeatureFlags.search),

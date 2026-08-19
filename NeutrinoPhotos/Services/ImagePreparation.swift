@@ -95,6 +95,28 @@ enum ImagePreparation {
                         captureDate: captureDate)
     }
 
+    /// The same, for bytes that must not be touched and whose type is already known.
+    ///
+    /// This is the RAW path. ``prepare(_:suggestedName:)`` asks ImageIO what the data is and decides
+    /// what to do about it; a DNG written out of the photo library has already been identified by
+    /// its `PHAssetResource`, and re-deriving the type from a raw file's headers is a way to get it
+    /// wrong — `CGImageSourceGetType` reports the generic `com.adobe.raw-image` for a dozen distinct
+    /// camera formats, which has no MIME type and no sensible extension.
+    ///
+    /// Nothing is converted. A RAW original that came back as a JPEG would not be a RAW original,
+    /// and the whole reason to reach past the picker for these bytes is that the picker hands back a
+    /// rendering rather than the file the camera wrote.
+    static func prepareOriginal(_ data: Data, mimeType: String, fileExtension: String) -> Prepared {
+        let source = CGImageSourceCreateWithData(data as CFData, nil)
+        return Prepared(data: data,
+                        mimeType: mimeType,
+                        fileExtension: fileExtension,
+                        // ImageIO renders a thumbnail from a DNG perfectly well, which is what keeps
+                        // a RAW photograph from being a grey box in every grid.
+                        thumbnailBase64: thumbnailBase64(from: data),
+                        captureDate: source.flatMap(captureDate(from:)))
+    }
+
     /// A file name for an uploaded picture, carrying the extension its bytes actually have.
     ///
     /// - Parameter fallbackDate: used to name a file the picker gave no name for. `PhotosPicker`

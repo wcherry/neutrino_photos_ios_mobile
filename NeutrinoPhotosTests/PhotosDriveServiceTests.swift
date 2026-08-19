@@ -179,6 +179,42 @@ final class PhotosDriveServiceTests: XCTestCase {
                        "and remembered across launches, not just within one")
     }
 
+    // MARK: - Live Photos folder
+
+    func testTheLivePhotosFolderIsResolvedAndRememberedSeparately() async throws {
+        MockURLProtocol.respond(json: Self.folderJSON(folders: [
+            Self.folderEntryJSON(id: "renditions", name: PhotosDriveService.renditionsFolderName),
+            Self.folderEntryJSON(id: "live", name: PhotosDriveService.livePhotosFolderName),
+        ]))
+
+        let renditions = try await sut.renditionsFolderID()
+        let livePhotos = try await sut.livePhotosFolderID()
+
+        // Two folders, cached under two keys. Sharing one cache slot would hand a preview upload
+        // the Live Photos folder — and file every rendition where nothing ever looks for one.
+        XCTAssertEqual(renditions, "renditions")
+        XCTAssertEqual(livePhotos, "live")
+        let remembered = await store.string(forKey: LocalStore.MetaKey.livePhotosFolderID)
+        XCTAssertEqual(remembered, "live")
+    }
+
+    func testCreatesTheLivePhotosFolderWhenThereIsNone() async throws {
+        MockURLProtocol.route([
+            ("/drive/folders/\(TestTokens.userId)", 200, Data(Self.folderJSON().utf8)),
+            ("/drive/folders", 201, Data(Self.folderEntryJSON(
+                id: "made", name: PhotosDriveService.livePhotosFolderName).utf8)),
+        ])
+
+        let folderID = try await sut.livePhotosFolderID()
+
+        XCTAssertEqual(folderID, "made")
+        // By method rather than by path: the listing that found nothing and the create that
+        // followed it are the same path, and the first one has no body at all.
+        let create = try XCTUnwrap(MockURLProtocol.requests.firstIndex { $0.httpMethod == "POST" })
+        XCTAssertTrue(String(decoding: MockURLProtocol.bodies[create], as: UTF8.self)
+            .contains(PhotosDriveService.livePhotosFolderName))
+    }
+
     // MARK: - Rendition index
 
     func testBuildsTheRenditionIndexFromTheFileNames() async throws {

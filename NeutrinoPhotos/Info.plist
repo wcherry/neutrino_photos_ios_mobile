@@ -44,6 +44,10 @@
 	</dict>
 	<key>NSPhotoLibraryAddUsageDescription</key>
 	<string>Neutrino Photos needs permission to save a photo back to your device's photo library.</string>
+	<key>NSPhotoLibraryUsageDescription</key>
+	<string>Neutrino Photos reads your photo library so imported photos keep their original dates, locations, favorites, Live Photo motion, and RAW originals.</string>
+	<key>PHPhotoLibraryPreventAutomaticLimitedAccessAlert</key>
+	<true/>
 	<key>UILaunchScreen</key>
 	<dict/>
 	<key>UISupportedInterfaceOrientations</key>

@@ -52,8 +52,11 @@ struct MediaItem: Identifiable, Hashable {
     let captureDate: Date?
     let createdAt: Date
     var updatedAt: Date
-    /// Dimensions and EXIF, extracted server-side. Nil until the metadata worker has run.
-    let metadata: MediaMetadata?
+    /// Dimensions, EXIF, and what the device library knew — see ``MediaMetadata``. `var` because
+    /// this app writes it: an end-to-end encrypted upload is one the server cannot read, so the
+    /// importing device is the only thing that can extract it, and it attaches it to the record it
+    /// has just registered.
+    var metadata: MediaMetadata?
 
     // MARK: - Computed
 
@@ -85,11 +88,24 @@ struct MediaItem: Identifiable, Hashable {
         ByteCountFormatter.string(fromByteCount: sizeBytes, countStyle: .file)
     }
 
-    /// "4032 × 3024", when the metadata worker has been round.
+    /// "4032 × 3024", once something has extracted it.
     var formattedDimensions: String? {
         guard let width = metadata?.width, let height = metadata?.height else { return nil }
         return "\(width) × \(height)"
     }
+
+    /// A photograph with motion beside it, imported from the device library.
+    ///
+    /// Stored rather than rendered: the paired video is uploaded and its Drive file id travels in
+    /// ``MediaDeviceFacts/liveVideoFileID``, so it can be saved back to Apple Photos as a Live Photo
+    /// today and played in place when v1.1 gets round to it.
+    var isLivePhoto: Bool { metadata?.device?.isLivePhoto == true }
+
+    /// A camera original the device wrote as RAW — a DNG, in practice. Uploaded untranscoded.
+    var isRAW: Bool { metadata?.device?.isRAW == true }
+
+    /// The paired video's Drive file, for a Live Photo whose motion this account holds.
+    var liveVideoFileID: String? { metadata?.device?.liveVideoFileID }
 
     // MARK: - Init
 
@@ -115,20 +131,77 @@ struct MediaItem: Identifiable, Hashable {
 
 // MARK: - MediaMetadata
 
-/// Dimensions and EXIF, as the server's metadata worker stores them.
+/// Dimensions, EXIF, and what the device library knew — everything about an item that is not its
+/// pixels.
 ///
-/// Every field is optional because the whole object is: it is written by a background job after the
-/// upload, so a photograph imported a second ago has none of it. The viewer's info panel shows what
-/// is there and omits what is not, rather than waiting for a complete set.
+/// ## Who writes this
 ///
-/// `Encodable` as well as `Decodable` only so ``LocalStore`` can keep it in a column. The property
-/// names *are* the wire names — the Photos endpoints serialize camelCase — so the encoded shape is
-/// the shape it arrived in, and a row written by one version decodes in the next.
+/// For a picture uploaded in the clear, the server's metadata worker: it can open the file, so it
+/// reads the dimensions and EXIF itself. For anything this app uploads, **nobody can but this app** —
+/// the bytes reaching the server are ciphertext and the key never leaves the device. So
+/// ``MediaMetadataExtractor`` reads it here at import and
+/// ``PhotoLibraryService/setMetadata(_:forPhoto:publishingLocation:)`` attaches it to the record,
+/// locally always and on the server as far as the user has agreed to.
+///
+/// Every field is optional because the whole object is: a photograph whose metadata has not been
+/// written yet has none of it, and the viewer's info panel shows what is there rather than a column
+/// of blanks.
+///
+/// `Encodable` as well as `Decodable` because both ``LocalStore`` and `PUT /photos/{id}/metadata`
+/// take it. The property names *are* the wire names — the Photos endpoints serialize camelCase — so
+/// the encoded shape is the shape it arrived in, and a row written by one version decodes in the
+/// next. That also means **new fields must be optional**: a device still on the old build has to be
+/// able to read a record a newer one wrote.
 struct MediaMetadata: Hashable, Codable {
     let width: Int?
     let height: Int?
     let format: String?
     let exif: MediaExif?
+    /// What the device's photo library knew and the pixels do not say. Absent for anything the
+    /// server extracted, and for an import made without photo-library access.
+    var device: MediaDeviceFacts?
+
+    init(width: Int? = nil, height: Int? = nil, format: String? = nil,
+         exif: MediaExif? = nil, device: MediaDeviceFacts? = nil) {
+        self.width = width
+        self.height = height
+        self.format = format
+        self.exif = exif
+        self.device = device
+    }
+}
+
+// MARK: - MediaDeviceFacts
+
+/// The facts about an item that only the device that imported it could know.
+///
+/// A `PHAsset` carries things no image file does — whether it was favourited in Apple Photos,
+/// whether it is a Live Photo, which burst it belongs to — and an encrypted upload gives the server
+/// no way to find any of it out. So the importing device records them here.
+///
+/// `localIdentifier` is a UUID meaningless on any other device; it is published anyway because it is
+/// half of Epic 6's duplicate rule ("content hash plus `PHAsset.localIdentifier`"), and a second
+/// device asking "have I already got this one?" needs to be able to read it.
+struct MediaDeviceFacts: Hashable, Codable {
+    /// The `PHAsset.localIdentifier` this came from.
+    let localIdentifier: String?
+    let isLivePhoto: Bool?
+    let isRAW: Bool?
+    /// `PHAssetMediaSubtype` names — "panorama", "screenshot", "hdr", "portrait", "slowMotion",
+    /// "timelapse". Strings rather than a bitmask so a subtype added by a future iOS survives a
+    /// round trip through a build that has never heard of it.
+    let subtypes: [String]?
+    /// The Drive file holding a Live Photo's paired video, when its motion was preserved.
+    var liveVideoFileID: String?
+
+    init(localIdentifier: String? = nil, isLivePhoto: Bool? = nil, isRAW: Bool? = nil,
+         subtypes: [String]? = nil, liveVideoFileID: String? = nil) {
+        self.localIdentifier = localIdentifier
+        self.isLivePhoto = isLivePhoto
+        self.isRAW = isRAW
+        self.subtypes = subtypes
+        self.liveVideoFileID = liveVideoFileID
+    }
 }
 
 // MARK: - MediaExif
@@ -136,6 +209,9 @@ struct MediaMetadata: Hashable, Codable {
 struct MediaExif: Hashable, Codable {
     let make: String?
     let model: String?
+    /// "iPhone 15 Pro back triple camera 6.765mm f/1.78" — EXIF's `LensModel`. Written by this app;
+    /// the server's worker does not extract it, so it is absent on anything uploaded in the clear.
+    var lensModel: String?
     let exposureTime: String?
     let fNumber: Double?
     let iso: Int?
@@ -143,6 +219,22 @@ struct MediaExif: Hashable, Codable {
     let gpsLatitude: Double?
     let gpsLongitude: Double?
     let datetimeOriginal: String?
+
+    init(make: String? = nil, model: String? = nil, lensModel: String? = nil,
+         exposureTime: String? = nil, fNumber: Double? = nil, iso: Int? = nil,
+         focalLength: Double? = nil, gpsLatitude: Double? = nil, gpsLongitude: Double? = nil,
+         datetimeOriginal: String? = nil) {
+        self.make = make
+        self.model = model
+        self.lensModel = lensModel
+        self.exposureTime = exposureTime
+        self.fNumber = fNumber
+        self.iso = iso
+        self.focalLength = focalLength
+        self.gpsLatitude = gpsLatitude
+        self.gpsLongitude = gpsLongitude
+        self.datetimeOriginal = datetimeOriginal
+    }
 
     /// True when the photograph carries a location — what the Places view will key off, and what
     /// the info panel offers to strip.
@@ -155,6 +247,74 @@ struct MediaExif: Hashable, Codable {
         if let exposureTime { parts.append(exposureTime) }
         if let iso { parts.append("ISO \(iso)") }
         return parts.isEmpty ? nil : parts.joined(separator: " · ")
+    }
+
+    /// True when there is anything here worth showing — so a record that extracted nothing can be
+    /// dropped rather than stored and published as a row of nulls.
+    var isEmpty: Bool {
+        make == nil && model == nil && lensModel == nil && exposureTime == nil && fNumber == nil
+            && iso == nil && focalLength == nil && datetimeOriginal == nil && !hasLocation
+    }
+
+    /// The same record with its coordinates removed.
+    var withoutLocation: MediaExif {
+        MediaExif(make: make, model: model, lensModel: lensModel, exposureTime: exposureTime,
+                  fNumber: fNumber, iso: iso, focalLength: focalLength,
+                  gpsLatitude: nil, gpsLongitude: nil, datetimeOriginal: datetimeOriginal)
+    }
+}
+
+// MARK: - Redaction
+
+extension MediaMetadata {
+
+    /// The same record with the coordinates removed — what leaves the device when the user has not
+    /// opted into publishing location.
+    ///
+    /// Everything else still goes: dimensions, camera, exposure. Location is singled out because it
+    /// is the one field that says where somebody *was*, and because it is the one the server has a
+    /// use for — `GET /api/v1/photos/map` reads exactly these two keys. Publishing it is therefore a
+    /// real trade rather than a formality: it is what will make Places work, and it is plaintext on
+    /// a server that can read nothing else about the picture.
+    var withoutLocation: MediaMetadata {
+        MediaMetadata(width: width, height: height, format: format,
+                      exif: exif?.withoutLocation, device: device)
+    }
+
+    /// True when nothing was extracted, so there is no reason to write or send it.
+    var isEmpty: Bool {
+        width == nil && height == nil && format == nil && (exif?.isEmpty ?? true) && device == nil
+    }
+
+    /// This record as the server sent it, with anything only *this device* holds folded back in.
+    ///
+    /// There is exactly one way for the two to differ and it is by design: coordinates are held
+    /// locally and published only if the user opted in (see
+    /// ``AppSettings/publishesLocationMetadata``), so a listing that has been round the server comes
+    /// back without them. Overwriting the local record with it would mean the info panel showed a
+    /// location until the next refresh and then quietly stopped.
+    ///
+    /// Nothing else is merged the other way. The server's copy wins for everything it carries,
+    /// because it is the one another device may have updated.
+    func mergingDeviceOnlyFacts(from local: MediaMetadata?) -> MediaMetadata {
+        guard let local else { return self }
+
+        var exif = self.exif
+        if exif?.hasLocation != true, let localExif = local.exif, localExif.hasLocation {
+            exif = MediaExif(make: exif?.make ?? localExif.make,
+                             model: exif?.model ?? localExif.model,
+                             lensModel: exif?.lensModel ?? localExif.lensModel,
+                             exposureTime: exif?.exposureTime ?? localExif.exposureTime,
+                             fNumber: exif?.fNumber ?? localExif.fNumber,
+                             iso: exif?.iso ?? localExif.iso,
+                             focalLength: exif?.focalLength ?? localExif.focalLength,
+                             gpsLatitude: localExif.gpsLatitude,
+                             gpsLongitude: localExif.gpsLongitude,
+                             datetimeOriginal: exif?.datetimeOriginal ?? localExif.datetimeOriginal)
+        }
+        return MediaMetadata(width: width ?? local.width, height: height ?? local.height,
+                             format: format ?? local.format, exif: exif,
+                             device: device ?? local.device)
     }
 }
 

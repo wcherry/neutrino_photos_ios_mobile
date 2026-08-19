@@ -33,7 +33,22 @@ enum FeatureFlags {
     static let videoPlayback: Bool = true
 
     /// Importing from the device's photo library, and the upload queue behind it.
+    ///
+    /// The roadmap's `import` flag, shared with Epic 6's full-library run. It covers the selective
+    /// path — the system picker, the preparation, the serial upload — which needs no photo-library
+    /// permission at all; the parts that do are ``deviceLibraryAccess``.
     static let importFromPhotos: Bool = true
+
+    /// Talking to `PHPhotoLibrary`: enriching an import from the asset it came from (capture date,
+    /// favourite, coordinates, Live Photo motion, the RAW original), and saving a photograph back
+    /// to the device.
+    ///
+    /// Separate from ``importFromPhotos`` because it is the only thing in this app that asks the
+    /// user for a permission they can refuse. Everything behind it degrades rather than breaks — an
+    /// import with no access falls back to what the file's own EXIF says — so a build with this off
+    /// is a working app that never shows a photo-library prompt, which is a real configuration and
+    /// not a broken one.
+    static let deviceLibraryAccess: Bool = true
 
     /// Favorites — the photo record's `isStarred` flag, shared with the web app.
     static let favorites: Bool = true

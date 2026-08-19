@@ -49,6 +49,8 @@ final class AppSettings: ObservableObject {
         static let timelineGrouping = "settings.timelineGrouping"
         static let showArchived     = "settings.showArchived"
         static let wifiOnlyUploads  = "settings.wifiOnlyUploads"
+        static let publishesLocation = "settings.publishesLocation"
+        static let importsLiveMotion = "settings.importsLiveMotion"
     }
 
     // MARK: - Published settings
@@ -74,6 +76,32 @@ final class AppSettings: ObservableObject {
         didSet { defaults.set(wifiOnlyUploads, forKey: Keys.wifiOnlyUploads) }
     }
 
+    /// Whether a photograph's coordinates are sent to Neutrino along with the rest of its metadata.
+    ///
+    /// Off by default, and the one setting in this app whose default is a privacy position rather
+    /// than a convenience. The picture itself is end-to-end encrypted and the server cannot read a
+    /// pixel of it; the metadata index is *not* encrypted, because the server has to be able to sort
+    /// and search it. Sending coordinates therefore hands Neutrino a list of where the user has
+    /// been, next to a library it otherwise cannot open — which is a real trade and belongs to them
+    /// rather than to a default.
+    ///
+    /// Nothing is lost locally either way: ``MediaMetadataExtractor`` reads the coordinates on this
+    /// device and ``LocalStore`` keeps them, so the info panel shows a location whether or not it
+    /// was published. What publishing buys is the same location on the user's *other* devices, and
+    /// the Places view and map search that will read `GET /api/v1/photos/map`.
+    @Published var publishesLocationMetadata: Bool {
+        didSet { defaults.set(publishesLocationMetadata, forKey: Keys.publishesLocation) }
+    }
+
+    /// Whether a Live Photo's paired video is uploaded beside its still.
+    ///
+    /// On by default — a Live Photo imported without its motion is not the thing the user took, and
+    /// preserving it is what makes it restorable to Apple Photos as a Live Photo. Offered as a
+    /// switch because the motion is roughly the size of the still again, over the whole library.
+    @Published var importsLivePhotoMotion: Bool {
+        didSet { defaults.set(importsLivePhotoMotion, forKey: Keys.importsLiveMotion) }
+    }
+
     // MARK: - Private
 
     private let defaults: UserDefaults
@@ -91,6 +119,12 @@ final class AppSettings: ObservableObject {
         // Defaults to on: an unattended import of a camera roll over cellular is a data bill, and
         // this is the more forgiving mistake of the two.
         self.wifiOnlyUploads = defaults.object(forKey: Keys.wifiOnlyUploads) as? Bool ?? true
+        // Defaults off: see the property. Opting *in* to sending location is a decision; opting out
+        // of it after the fact does not un-send what has already gone.
+        self.publishesLocationMetadata =
+            defaults.object(forKey: Keys.publishesLocation) as? Bool ?? false
+        self.importsLivePhotoMotion =
+            defaults.object(forKey: Keys.importsLiveMotion) as? Bool ?? true
     }
 
     // MARK: - Reset
@@ -100,5 +134,7 @@ final class AppSettings: ObservableObject {
         timelineGrouping = .day
         showArchived = false
         wifiOnlyUploads = true
+        publishesLocationMetadata = false
+        importsLivePhotoMotion = true
     }
 }

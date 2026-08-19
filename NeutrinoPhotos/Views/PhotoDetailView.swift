@@ -18,6 +18,9 @@ struct PhotoDetailView: View {
     @EnvironmentObject private var library: PhotoLibraryService
     @EnvironmentObject private var albums: AlbumService
     @EnvironmentObject private var content: MediaContentService
+    @EnvironmentObject private var deviceLibrary: DevicePhotoLibrary
+    /// Held only to hand on to the info sheet, which says whether a location was published.
+    @EnvironmentObject private var settings: AppSettings
 
     @Environment(\.dismiss) private var dismiss
 
@@ -25,6 +28,11 @@ struct PhotoDetailView: View {
     @State private var showsChrome = true
     @State private var showsInfo = false
     @State private var showsAlbumPicker = false
+    @State private var isSaving = false
+    /// The one line the save reports, success or failure. An alert rather than a toast because
+    /// "saved" and "couldn't save" are both worth being sure of, and a photo library is the sort of
+    /// place a user goes looking straight afterwards.
+    @State private var saveOutcome: SaveOutcome?
 
     init(items: [MediaItem], initialID: String) {
         self.items = items
@@ -60,6 +68,7 @@ struct PhotoDetailView: View {
         .sheet(isPresented: $showsInfo) {
             if let current {
                 MediaInfoView(item: current)
+                    .environmentObject(settings)
             }
         }
         .sheet(isPresented: $showsAlbumPicker) {
@@ -67,6 +76,62 @@ struct PhotoDetailView: View {
                 AlbumPickerView(item: current)
                     .environmentObject(albums)
             }
+        }
+        .alert(saveOutcome?.title ?? "", isPresented: saveAlertBinding) {
+            Button("OK") { saveOutcome = nil }
+        } message: {
+            Text(saveOutcome?.message ?? "")
+        }
+    }
+
+    // MARK: - Save to device
+
+    /// What a save reported.
+    private struct SaveOutcome: Identifiable {
+        let id = UUID()
+        let title: String
+        let message: String
+    }
+
+    private var saveAlertBinding: Binding<Bool> {
+        Binding(get: { saveOutcome != nil }, set: { if !$0 { saveOutcome = nil } })
+    }
+
+    /// Writes the item's decrypted original back into Apple Photos.
+    ///
+    /// The **original**, not what is on screen: the viewer may be showing a 2048 px preview, and
+    /// exporting that would hand the user a downscaled copy of their own photograph under the name
+    /// of the real one. So this fetches the full file, which for anything not already cached is a
+    /// download — hence the spinner.
+    ///
+    /// A Live Photo goes back with its motion. That is what ``MediaContentService/livePhotoVideoURL(for:)``
+    /// is for, and it is the round trip verification step 7 asks for: import a Live Photo, export
+    /// it, and get a Live Photo back rather than a still and a stray clip.
+    private func saveToDevice() async {
+        guard let item = current, !isSaving else { return }
+        isSaving = true
+        defer { isSaving = false }
+
+        do {
+            if item.kind == .video {
+                let url = try await content.localURL(for: item)
+                try await deviceLibrary.save(videoAt: url, fileName: item.fileName)
+            } else {
+                let data = try await content.originalData(for: item)
+                // Best-effort: a Live Photo whose motion will not come down is still worth saving
+                // as the photograph it is.
+                let motion = item.liveVideoFileID == nil
+                    ? nil
+                    : try? await content.livePhotoVideoURL(for: item)
+                try await deviceLibrary.save(photo: data, fileName: item.fileName,
+                                             pairedVideoURL: motion)
+            }
+            saveOutcome = SaveOutcome(
+                title: "Saved",
+                message: "\(item.displayName) is in your device's photo library.")
+        } catch {
+            saveOutcome = SaveOutcome(title: "Couldn't Save",
+                                      message: error.localizedDescription)
         }
     }
 
@@ -113,7 +178,9 @@ struct PhotoDetailView: View {
     }
 
     private var bottomBar: some View {
-        HStack(spacing: 36) {
+        // Tightened from 36 when Save to Device made this five buttons: at 36 the row overflows a
+        // 320 pt screen, and the first thing to fall off it is Delete.
+        HStack(spacing: 28) {
             if FeatureFlags.favorites {
                 Button {
                     guard let current else { return }
@@ -121,6 +188,19 @@ struct PhotoDetailView: View {
                 } label: {
                     Image(systemName: current?.isStarred == true ? "heart.fill" : "heart")
                 }
+            }
+            if FeatureFlags.deviceLibraryAccess {
+                Button {
+                    Task { await saveToDevice() }
+                } label: {
+                    if isSaving {
+                        ProgressView()
+                            .tint(.white)
+                    } else {
+                        Image(systemName: "square.and.arrow.down")
+                    }
+                }
+                .disabled(isSaving)
             }
             if FeatureFlags.albums {
                 Button {

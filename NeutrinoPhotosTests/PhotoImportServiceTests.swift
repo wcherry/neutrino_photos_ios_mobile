@@ -93,6 +93,36 @@ final class PhotoImportServiceTests: XCTestCase {
         XCTAssertFalse(monitor.shouldUpload(wifiOnly: true))
     }
 
+    // MARK: - What leaves the device
+
+    func testLocationIsNotPublishedUnlessTheUserAsksForIt() {
+        // The one default in this app that is a privacy position rather than a convenience. The
+        // photograph is end-to-end encrypted; its metadata index is not, because the server sorts
+        // and searches it — so publishing coordinates hands Neutrino a list of where somebody has
+        // been, beside a library it otherwise cannot open.
+        XCTAssertFalse(settings.publishesLocationMetadata)
+
+        let reloaded = AppSettings(defaults: defaults)
+        XCTAssertFalse(reloaded.publishesLocationMetadata)
+    }
+
+    func testLivePhotoMotionIsPreservedByDefault() {
+        // A Live Photo imported without its motion is not the thing the user took. It is a switch
+        // because the motion is roughly the size of the still again over a whole library, not
+        // because keeping it is the unusual choice.
+        XCTAssertTrue(settings.importsLivePhotoMotion)
+    }
+
+    func testBothSettingsSurviveARelaunch() {
+        settings.publishesLocationMetadata = true
+        settings.importsLivePhotoMotion = false
+
+        let reloaded = AppSettings(defaults: defaults)
+
+        XCTAssertTrue(reloaded.publishesLocationMetadata)
+        XCTAssertFalse(reloaded.importsLivePhotoMotion)
+    }
+
     // MARK: - Import history
 
     func testImportHistoryPersistsAndCanBeForgotten() {
@@ -159,6 +189,35 @@ final class ImagePreparationTests: XCTestCase {
         let image = try XCTUnwrap(UIImage(data: thumbnail))
         XCTAssertLessThanOrEqual(max(image.size.width, image.size.height),
                                  ImagePreparation.thumbnailMaximumPixels)
+    }
+
+    // MARK: - Originals that must not be touched
+
+    func testPreparingAnOriginalKeepsItsBytesAndItsDeclaredType() throws {
+        // The RAW path. `prepare(_:suggestedName:)` asks ImageIO what the data is and decides what
+        // to do about it; a DNG written out of the photo library has already been identified by its
+        // `PHAssetResource`, and `CGImageSourceGetType` would report the generic
+        // `com.adobe.raw-image` for it — which has no MIME type and no sensible extension.
+        let jpeg = try Self.makeJPEG(size: 256)
+
+        let prepared = ImagePreparation.prepareOriginal(jpeg, mimeType: "image/x-adobe-dng",
+                                                        fileExtension: "dng")
+
+        XCTAssertEqual(prepared.data, jpeg, "a RAW original that came back re-encoded is not one")
+        XCTAssertEqual(prepared.mimeType, "image/x-adobe-dng")
+        XCTAssertEqual(prepared.fileExtension, "dng")
+        XCTAssertNotNil(prepared.thumbnailBase64,
+                        "ImageIO renders a thumbnail from a raw file, which is what keeps it from "
+                        + "being a grey box in every grid")
+    }
+
+    func testPreparingAnOriginalStillReadsTheCaptureDateOutOfIt() throws {
+        let jpeg = TestImages.jpegWithMetadata(dateTimeOriginal: "2024:06:15 14:25:36")
+
+        let prepared = ImagePreparation.prepareOriginal(jpeg, mimeType: "image/jpeg",
+                                                        fileExtension: "jpg")
+
+        XCTAssertNotNil(prepared.captureDate)
     }
 
     // MARK: - Fingerprints

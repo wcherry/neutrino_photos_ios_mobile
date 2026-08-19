@@ -480,15 +480,76 @@ Covers mvp.md §3 iOS Photos Integration (selective path), §19 items 3.
 
 **Deliverables**
 
-- [ ] `PhotosPicker`-based selective import (out-of-process; needs no library authorization —
+- [x] `PhotosPicker`-based selective import (out-of-process; needs no library authorization —
       see the `project.yml` note)
-- [ ] `PHPhotoLibrary` full-access path for full-library import, with the authorization prompt
+      — shipped in Epic 3 and unchanged in shape: the picker is still the only route in, still needs
+      no permission, and still runs one item at a time. What Epic 5 added is what happens *around*
+      each item once the library can be seen.
+- [x] `PHPhotoLibrary` full-access path for full-library import, with the authorization prompt
       and a graceful "limited access" state
-- [ ] Metadata extraction: creation date, GPS, camera/lens, EXIF, favorite status
-- [ ] Live Photo and RAW detection and preservation (stored now, rendered in v1.1)
-- [ ] Save-back to the device library (`NSPhotoLibraryAddUsageDescription` is already declared)
+      — `DevicePhotoLibrary`, and Settings › This Device's Photos › Photo Library. Access is
+      **offered, not demanded**: every one of the five things below degrades to what the file itself
+      says, so a user who declines has the app they had before. `limited` is a first-class state
+      rather than a failure — the user shared a subset and the subset is what gets read — and it is
+      the only state with a way to widen itself, via `presentLimitedLibraryPicker`. `restricted` is
+      kept separate from `denied` because sending somebody to Settings to find a switch an MDM
+      profile removed is worse than saying so. The enumeration itself is Epic 6's; this is the door.
+- [x] Metadata extraction: creation date, GPS, camera/lens, EXIF, favorite status
+      — `MediaMetadataExtractor` and `PhotoLibraryService.setMetadata`. This is the deliverable that
+      turned out to be forced rather than optional: `MediaItem.metadata` was nil for *every item this
+      app had ever imported*, because the server's metadata worker cannot open a file it only has the
+      ciphertext of. The device is the one place an encrypted photograph's EXIF is readable, and
+      `PUT /api/v1/photos/{id}/metadata` — a worker endpoint that takes an opaque JSON blob — is
+      where it goes.
+      **Location is the one field held back.** The picture is E2E encrypted; the metadata index is
+      not, because the server sorts and searches it, so publishing coordinates hands Neutrino a list
+      of where somebody has been beside a library it otherwise cannot open. `AppSettings
+      .publishesLocationMetadata` defaults to `false`; the coordinates are extracted and kept
+      locally either way, so the Info sheet is complete offline and a refresh does not blank it
+      (`PhotoLibraryService.mergingDeviceOnlyMetadata`). Turning it on is what will make Epic 15's
+      Places and map search work, and the Info sheet says which side of that line each photograph
+      fell on.
+- [x] Live Photo and RAW detection and preservation (stored now, rendered in v1.1)
+      — both preserved rather than merely detected, which is the difference that costs something.
+      A **Live Photo**'s paired video is a second `PHAssetResource` that nothing about the still
+      refers to, so uploading only the still discards the motion silently; it now goes up encrypted
+      into a `Live Photos` Drive folder (a subfolder because a MOV in the root is a *video* to the
+      root-scoped `type=video` listing, and the timeline would gain a two-second clip beside the
+      photograph), and its file id travels in the photo record's metadata so any device learns of it
+      from one listing. **RAW** is fetched as the resource the camera wrote: the picker hands back a
+      compatible JPEG rendering of a DNG, and storing that under the name "original" would make the
+      backup a lie. Both draw a badge in the grid; neither is rendered in the viewer, which is what
+      v1.1 is for, and `MediaInfoView` says "motion stored" rather than "Live Photo" so the label
+      does not promise a press-and-hold that does nothing.
+- [x] Save-back to the device library (`NSPhotoLibraryAddUsageDescription` is already declared)
+      — the viewer's download button. Writes the **original**, not the 2048 px preview on screen,
+      and through `addResource(with:data:)` rather than `creationRequestForAsset(from: UIImage)`,
+      which would re-encode a DNG into a JPEG on the way out. A Live Photo goes back *as a Live
+      Photo*, still and paired video together, which is what closes verification step 7's round
+      trip. Add-only is a separate and much smaller permission, tracked separately, and asked for
+      only the first time the button is used.
 
-**Flag:** `import`
+**Flag:** `import` — spelled `importFromPhotos` and shared with Epic 6, exactly as planned. The
+`PHPhotoLibrary` half got a flag of its own, **`deviceLibraryAccess`**, because it is the only thing
+in this app that asks for a permission the user can refuse: everything behind it degrades rather
+than breaks, so a build with it off is a working app that never shows a photo-library prompt.
+
+**Status (2026-08-19):** all five deliverables are implemented; **306 unit tests pass** (up from
+264). Two things are worth knowing:
+
+- **`PHAsset` cannot be constructed and a simulator has no camera roll**, so nothing downstream of
+  the Photos framework could be tested through it. That is why `DeviceAsset` exists — a plain value
+  holding everything the importer needs — and the extraction, merging, redaction, and publishing are
+  all asserted against it rather than against a mock library. `DevicePhotoLibraryTests` covers what
+  is left: the authorization mapping, and that constructing the service prompts for nothing.
+- **The EXIF assertions use real JPEGs with real EXIF**, written by `CGImageDestination`
+  (`TestImages.jpegWithMetadata`). A hand-built dictionary would assert that ImageIO can round-trip
+  a `CFDictionary`, which is not the thing under test — the hemisphere-ref bug that puts Santiago in
+  Boston only shows up against a real APP1 segment.
+- **Not covered, and not coverable here:** every one of the eight manual verification steps. Steps
+  5 and 6 need a device with the grant actually changed, step 7 needs a Live Photo and a DNG in a
+  real library, and step 8 needs a photo library to write into. **M2 is not closed by this epic**;
+  these steps and Epic 4's nine remain.
 
 **Manual verification**
 
@@ -500,8 +561,14 @@ Covers mvp.md §3 iOS Photos Integration (selective path), §19 items 3.
    selected subset; no crash, no infinite spinner.
 6. **Deny** access entirely → app explains, offers Settings deep link, other tabs still work.
 7. Import a Live Photo and a DNG → both stored, both exportable; verify by exporting and
-   re-importing to Apple Photos.
+   re-importing to Apple Photos. The Live Photo must come back **as a Live Photo** — a still plus a
+   stray clip means the paired video went up but did not come back paired.
 8. Viewer → Save to device → appears in Apple Photos.
+9. Import one photo with a known location, with **Settings → Privacy → Include location in cloud
+   metadata off**. Confirm with a proxy that no coordinates appear in the
+   `PUT /api/v1/photos/{id}/metadata` body, and that the Info sheet still shows them. Then pull to
+   refresh and confirm they are *still* there — the merge that keeps them is the easiest thing in
+   this epic to break without noticing.
 
 **Milestone M2 complete** when a user can pick photos and browse them in a real timeline.
 

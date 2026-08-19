@@ -26,6 +26,7 @@ struct NeutrinoPhotosApp: App {
     @StateObject private var devices: DeviceSessionService
     @StateObject private var drive: PhotosDriveService
     @StateObject private var thumbnails: ThumbnailCache
+    @StateObject private var deviceLibrary: DevicePhotoLibrary
     @StateObject private var keyFiles = KeyFileRouter()
 
     /// The device's copy of the library. Optional because opening a database can fail — a full
@@ -33,6 +34,8 @@ struct NeutrinoPhotosApp: App {
     /// an accelerator rather than a source of truth, so "no database" degrades to the behaviour the
     /// app had before there was one.
     private let store: LocalStore?
+
+    @Environment(\.scenePhase) private var scenePhase
 
     // MARK: - Init
 
@@ -49,6 +52,10 @@ struct NeutrinoPhotosApp: App {
         let settings = AppSettings()
         let monitor = NetworkMonitor()
         let vault = KeyVaultService(api: api)
+        // Constructed unconditionally, even with `deviceLibraryAccess` off: it reads the standing
+        // authorization status and prompts for nothing until something asks it to, so building it
+        // does not show the user a permission alert.
+        let deviceLibrary = DevicePhotoLibrary()
 
         self.store = store
         _api = StateObject(wrappedValue: api)
@@ -61,8 +68,10 @@ struct NeutrinoPhotosApp: App {
         _networkMonitor = StateObject(wrappedValue: monitor)
         _vault = StateObject(wrappedValue: vault)
         _devices = StateObject(wrappedValue: DeviceSessionService(api: api))
+        _deviceLibrary = StateObject(wrappedValue: deviceLibrary)
         _importer = StateObject(wrappedValue: PhotoImportService(
-            content: content, library: library, settings: settings, monitor: monitor, vault: vault
+            content: content, library: library, settings: settings, monitor: monitor, vault: vault,
+            deviceLibrary: deviceLibrary
         ))
     }
 
@@ -82,9 +91,17 @@ struct NeutrinoPhotosApp: App {
                 .environmentObject(devices)
                 .environmentObject(drive)
                 .environmentObject(thumbnails)
+                .environmentObject(deviceLibrary)
                 .environmentObject(keyFiles)
                 .preferredColorScheme(settings.theme.colorScheme)
                 .task { await configure() }
+                // Photo-library permission is changed in Settings, and iOS does not tell an app it
+                // happened — it simply stops answering. Re-reading it on every return to the
+                // foreground is the only way the screen that shows it can be right.
+                .onChange(of: scenePhase) { phase in
+                    guard phase == .active else { return }
+                    deviceLibrary.refresh()
+                }
                 .onOpenURL { url in
                     // A `.json` key file AirDropped or tapped in Files. Declaring the document type
                     // in `project.yml` is what makes iOS offer this app; consuming the URL here is

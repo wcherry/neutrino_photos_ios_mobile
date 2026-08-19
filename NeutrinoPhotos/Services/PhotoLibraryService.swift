@@ -139,10 +139,11 @@ final class PhotoLibraryService: ObservableObject {
         do {
             let response: APIListPhotosResponse =
                 try await api.get("/api/v1/photos?archivedOnly=true", decoder: Self.decoder)
-            allItems = response.photos
+            let merged = mergingDeviceOnlyMetadata(into: response.photos)
+            allItems = merged
             lastLoadedAt = Date()
             logger.debug("load succeeded: \(response.photos.count) items")
-            try? await store?.replaceLibrary(with: response.photos)
+            try? await store?.replaceLibrary(with: merged)
         } catch {
             logger.error("load failed: \(error, privacy: .public)")
             // A failed refresh over a library that is already on screen is a stale timeline, not an
@@ -224,6 +225,87 @@ final class PhotoLibraryService: ObservableObject {
         return item
     }
 
+    // MARK: - Metadata
+
+    /// Attaches the metadata this device extracted from a picture to its photo record.
+    ///
+    /// ## Why the app writes this at all
+    ///
+    /// The server has a worker that reads dimensions and EXIF off an uploaded file, and for a file
+    /// uploaded in the clear that is the right place for it. Nothing this app uploads is in the
+    /// clear: what reaches Neutrino is ciphertext and the key never leaves the phone, so an
+    /// encrypted photograph's metadata is extractable in exactly one place — the importing device,
+    /// while it still has the plaintext. Without this, `metadata` is nil forever for every item this
+    /// app has ever imported.
+    ///
+    /// ## What is sent, and what is not
+    ///
+    /// Both, always, locally: the full record goes into ``allItems`` and into ``LocalStore``, so the
+    /// info panel is complete and offline the moment the import finishes.
+    ///
+    /// Only the non-locating half leaves the device unless the user has said otherwise —
+    /// see ``AppSettings/publishesLocationMetadata``. `PUT /api/v1/photos/{id}/metadata` stores a
+    /// plaintext JSON blob, and `GET /api/v1/photos/map` reads exactly the two GPS keys out of it,
+    /// so publishing coordinates is what makes Places work *and* is a list of where somebody has
+    /// been sitting beside a library the server otherwise cannot open.
+    ///
+    /// A failure to publish is logged and swallowed. The photograph is uploaded and registered by
+    /// the time this runs, the local record is already written, and failing an import over its
+    /// index entry would trade the thing that matters for the thing that does not.
+    func setMetadata(_ metadata: MediaMetadata, forPhoto id: String,
+                     publishingLocation: Bool) async {
+        guard !metadata.isEmpty else { return }
+
+        if let index = allItems.firstIndex(where: { $0.id == id }) {
+            allItems[index].metadata = metadata
+            try? await store?.save(allItems[index])
+        }
+
+        let published = publishingLocation ? metadata : metadata.withoutLocation
+        do {
+            _ = try await api.send(method: "PUT", path: "/api/v1/photos/\(id)/metadata",
+                                   json: published)
+            logger.debug("metadata published for \(id, privacy: .public) (location=\(publishingLocation))")
+        } catch {
+            logger.error("metadata publish failed for \(id, privacy: .public): \(error, privacy: .public)")
+        }
+    }
+
+    /// Puts a single server copy of an item back into ``allItems``, keeping the metadata only this
+    /// device holds. Answers what was actually stored, or nil if the item has since left the library.
+    ///
+    /// The case this exists for is narrow and easy to miss. Importing a favourited photograph fires
+    /// two writes at once: a `PATCH` setting the star, and a `PUT` attaching the metadata. The
+    /// `PATCH` response carries `metadata: null` — the server has not been told yet — so whichever
+    /// of the two lands second wins, and half the time that is the one that blanks the record the
+    /// other just wrote. Merging rather than assigning makes the order stop mattering.
+    @discardableResult
+    private func replaceKeepingLocalMetadata(with updated: MediaItem) -> MediaItem? {
+        guard let index = allItems.firstIndex(where: { $0.id == updated.id }) else { return nil }
+        var updated = updated
+        updated.metadata = updated.metadata?.mergingDeviceOnlyFacts(from: allItems[index].metadata)
+            ?? allItems[index].metadata
+        allItems[index] = updated
+        return updated
+    }
+
+    /// Folds what only this device knows back into a listing that has been round the server.
+    ///
+    /// Coordinates held back from publication are the one thing that can be in the local copy and
+    /// not in the server's — see ``setMetadata(_:forPhoto:publishingLocation:)``. Without this, a
+    /// pull to refresh would blank the location on every photograph the user chose not to publish.
+    private func mergingDeviceOnlyMetadata(into incoming: [MediaItem]) -> [MediaItem] {
+        guard !allItems.isEmpty else { return incoming }
+        let local = Dictionary(allItems.map { ($0.id, $0.metadata) }, uniquingKeysWith: { first, _ in first })
+        return incoming.map { item in
+            guard let localMetadata = local[item.id] ?? nil else { return item }
+            var item = item
+            item.metadata = item.metadata?.mergingDeviceOnlyFacts(from: localMetadata)
+                ?? localMetadata
+            return item
+        }
+    }
+
     // MARK: - Favorites / Archive
 
     func setStarred(id: String, isStarred: Bool) {
@@ -247,10 +329,9 @@ final class PhotoLibraryService: ObservableObject {
             do {
                 let updated: MediaItem = try await api.patch("/api/v1/photos/\(id)", body: body,
                                                              decoder: Self.decoder)
-                if let index = allItems.firstIndex(where: { $0.id == id }) {
-                    allItems[index] = updated
+                if let merged = replaceKeepingLocalMetadata(with: updated) {
+                    try? await store?.save(merged)
                 }
-                try? await store?.save(updated)
             } catch {
                 logger.error("update failed: id=\(id, privacy: .public) \(error, privacy: .public)")
                 if let index = allItems.firstIndex(where: { $0.id == id }) {
@@ -293,10 +374,8 @@ final class PhotoLibraryService: ObservableObject {
             do {
                 let restored: MediaItem = try await api.post("/api/v1/photos/\(id)/restore",
                                                              decoder: Self.decoder)
-                if let index = allItems.firstIndex(where: { $0.id == id }) {
-                    allItems[index] = restored
-                }
-                try? await store?.save(restored, trashed: false)
+                let merged = replaceKeepingLocalMetadata(with: restored) ?? restored
+                try? await store?.save(merged, trashed: false)
                 logger.debug("restore succeeded: id=\(id, privacy: .public)")
             } catch {
                 logger.error("restore failed: id=\(id, privacy: .public) \(error, privacy: .public)")

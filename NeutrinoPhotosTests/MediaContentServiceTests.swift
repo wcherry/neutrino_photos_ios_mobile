@@ -387,6 +387,90 @@ final class MediaContentServiceTests: XCTestCase {
         XCTAssertTrue(filedBody.contains("renditions"))
     }
 
+    // MARK: - Live Photos
+
+    func testAPairedVideoIsEncryptedAndFiledOutOfTheTimeline() async throws {
+        // A Live Photo's motion is a MOV, and a MOV in the Drive root is a *video* to the
+        // `type=video` listing — so filing it there would put a two-second clip beside the
+        // photograph it belongs to in the timeline. It goes in a subfolder, encrypted like
+        // everything else, and is never registered as a photo.
+        MockURLProtocol.handler = { request in
+            let path = request.url?.path ?? ""
+            let body: Data
+            switch (request.httpMethod, path) {
+            case ("POST", "/api/v1/drive/folders"):
+                body = Data(#"{"id":"live-folder","name":"Live Photos","parentId":null}"#.utf8)
+            case ("POST", "/api/v1/drive/files/upload"):
+                body = Data(Self.uploadResponseJSON(id: "file-live").utf8)
+            default:
+                body = Data(#"{"folder":null,"folders":[],"files":[]}"#.utf8)
+            }
+            return (HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil,
+                                    headerFields: nil)!, body)
+        }
+        let url = makeTemporaryDirectory().appendingPathComponent("motion.mov")
+        let motion = Data((0..<4096).map { UInt8($0 % 251) })
+        try motion.write(to: url)
+
+        let videoFileID = try await sut.uploadLivePhotoVideo(forOriginal: "file-orig", from: url)
+
+        XCTAssertEqual(videoFileID, "file-live")
+        let body = try XCTUnwrap(MockURLProtocol.body(forPathContaining: "/files/upload"))
+        let text = String(decoding: body, as: UTF8.self)
+        XCTAssertTrue(text.contains("live-folder"), "a paired video in the root is a stray clip")
+        XCTAssertTrue(text.contains("file-orig.live.mov"))
+        XCTAssertFalse(body.range(of: motion) != nil,
+                       "the motion must not appear in the request in the clear")
+
+        // And nothing registered it as a photograph: one thing was photographed, and the timeline
+        // should show one item.
+        XCTAssertNil(MockURLProtocol.request { ($0.url?.path ?? "") == "/api/v1/photos" })
+    }
+
+    func testNoLivePhotosFolderMeansNoMotionRatherThanAFailedImport() async throws {
+        let sut = MediaContentService(api: APIClient(session: MockURLProtocol.makeSession()),
+                                      store: store, drive: nil, originals: originals,
+                                      thumbnails: ThumbnailCache(disk: originals))
+        let url = makeTemporaryDirectory().appendingPathComponent("motion.mov")
+        try Data("clip".utf8).write(to: url)
+
+        let videoFileID = try await sut.uploadLivePhotoVideo(forOriginal: "file-orig", from: url)
+
+        XCTAssertNil(videoFileID)
+    }
+
+    func testAPairedVideoComesBackDecryptedAndIsCached() async throws {
+        // "Stored now, rendered in v1.1" only means anything if the motion can be got back. This is
+        // what Save to Device reads to put a real Live Photo into Apple Photos.
+        let motion = Data("the moment before the shutter".utf8)
+        let dek = MediaCrypto.newDEK()
+        let ciphertext = try MediaCrypto.encrypt(Bytes(motion), dek: dek)
+        let sealed = try sut.sealDEK(dek)
+        MockURLProtocol.route([
+            ("/files/live-1/key", 200, Data(#"{"encrypted_file_key":"\#(sealed)"}"#.utf8)),
+            ("/files/live-1", 200, ciphertext),
+        ])
+        let item = Fixture.item(metadata: MediaMetadata(
+            device: MediaDeviceFacts(isLivePhoto: true, liveVideoFileID: "live-1")))
+
+        let url = try await sut.livePhotoVideoURL(for: item)
+        XCTAssertEqual(try Data(contentsOf: url), motion)
+
+        MockURLProtocol.reset()
+        let again = try await sut.livePhotoVideoURL(for: item)
+        XCTAssertEqual(again, url)
+        XCTAssertEqual(MockURLProtocol.requestCount, 0, "a second read is served from the cache")
+    }
+
+    func testAskingForMotionAnItemDoesNotHaveIsAnErrorAndNotADownload() async {
+        do {
+            _ = try await sut.livePhotoVideoURL(for: Fixture.item())
+            XCTFail("expected a refusal")
+        } catch {
+            XCTAssertEqual(MockURLProtocol.requestCount, 0)
+        }
+    }
+
     // MARK: - Renditions on upload
 
     func testUploadingAPictureAlsoUploadsItsPreviewRendition() async throws {
