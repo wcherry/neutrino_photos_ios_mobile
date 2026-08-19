@@ -6,6 +6,8 @@
 	<array>
 		<string>applinks:www.getneutrino.app</string>
 		<string>applinks:getneutrino.app</string>
+		<string>webcredentials:www.getneutrino.app</string>
+		<string>webcredentials:getneutrino.app</string>
 	</array>
 </dict>
 </plist>

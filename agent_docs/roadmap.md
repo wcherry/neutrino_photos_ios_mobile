@@ -94,10 +94,12 @@ Covers mvp.md §18 Phase 0.
 - [ ] Error/retry policy: which errors are retryable, backoff curve, poison-item handling
 - [x] Key management: master key → per-file DEK derivation, matching the web app's
       `crypto_box_seal` + XChaCha20-Poly1305 secretstream (see `project.yml` notes)
-      — implemented in `MediaContentService` (`sealDEK` / `unsealDEK` / `encrypt` / `decryptToBytes`)
-      and `KeyImportService`, and asserted against real crypto rather than a mock. Note the DEK is
-      *generated* per file and sealed to the account's Curve25519 identity key, not derived from a
-      master key — that is what the web app does and the two must agree.
+      — implemented in `MediaCrypto` (the primitives), `MediaContentService` (`sealDEK` / `unsealDEK`,
+      which is the part that needs the Keychain), and `KeyImportService`, and asserted against real
+      crypto rather than a mock. Note the DEK is *generated* per file and sealed to the account's
+      Curve25519 identity key, not derived from a master key — that is what the web app does and the
+      two must agree. Epic 2 added the layer above it: the master key is what wraps the *identity*,
+      and `KeyVaultCrypto` is where that envelope lives.
 
 **Status (verified 2026-08-18):** three of nine deliverables are done — and they are the three the
 app was *forced* to decide in order to ship the timeline, so they exist as working code rather than
@@ -188,15 +190,56 @@ Covers mvp.md §4 Encryption, §19 items 2.
 
 **Deliverables**
 
-- [ ] Vault unlock: password (Argon2id) and passkey/PRF, matching the Notes implementation
-- [ ] Master key in Keychain, `kSecAttrAccessibleAfterFirstUnlock` — background upload needs it
-- [ ] Per-file DEK generation and sealing to the account identity key
-- [ ] Encrypt/decrypt helpers: streaming for large originals, one-shot for metadata/thumbnails
-- [ ] Key import via `.json` key file (the `com.neutrino.photos.keyfile` UTI is already declared)
-- [ ] Device key registration and listing
-- [ ] Locked state: what the UI shows when signed in but vault-locked
+- [x] Vault unlock: password (Argon2id) and passkey/PRF, matching the Notes implementation
+      — `KeyVaultCrypto` + `KeyVaultService`. Password and recovery code are done and asserted against
+      a vault the *web* client produced (`WebVault` in `TestSupport`), not against a round trip through
+      this app — a self-consistent round trip passes just as happily when both halves are wrong
+      together. Passkey/PRF goes further than the Notes port, which skips it: `PasskeyPRFAuthenticator`
+      performs an `ASAuthorization` PRF assertion on iOS 18+ and the unlock screen hides the option
+      below that. See the caveat under Status.
+- [x] Master key in Keychain, `kSecAttrAccessibleAfterFirstUnlock` — background upload needs it
+      — with one deliberate deviation: what is persisted is the *identity key* MK protects, not MK
+      itself, which exists only for the moment it takes to unwrap. Keeping MK would buy exactly one
+      thing this app does not do — enrolling a new unlock method — for a second long-lived secret on
+      the device. The accessibility class is `…AfterFirstUnlockThisDeviceOnly`, and
+      `KeychainAccessibilityTests` asserts it on every key entry rather than trusting the write sites.
+- [x] Per-file DEK generation and sealing to the account identity key
+      — moved out of `MediaContentService` into `MediaCrypto`, which has no actor and no networking.
+      What stays behind is the only part that needs the Keychain: which key pair a DEK is sealed to.
+- [x] Encrypt/decrypt helpers: streaming for large originals, one-shot for metadata/thumbnails
+      — `MediaCrypto.encryptStream` / `decryptStream` hold one chunk at a time regardless of file
+      size; the one-shot pair stays for metadata, thumbnails, and ordinary photographs. A file that
+      fits in one chunk comes out byte-identical to the single-push format, which is what keeps web
+      interop. Read the note on `MediaCrypto` before using the chunked writer — the framing is not
+      inferable and has to travel in the file's encrypted metadata.
+- [x] Key import via `.json` key file (the `com.neutrino.photos.keyfile` UTI is already declared)
+      — the UTI was declared but nothing consumed the URL, so tapping a key file did nothing.
+      `KeyFileRouter` + `onOpenURL` closes that; the in-app file picker and paste box stay.
+- [x] Device key registration and listing
+      — `DeviceSessionService` over `GET/DELETE /api/v1/auth/sessions`, surfaced as Settings › Devices.
+      Registration is a property of signing in rather than a call of its own (a device names itself in
+      `X-Device-Name`), so "registered" is honestly labelled as when that device signed in.
+- [x] Locked state: what the UI shows when signed in but vault-locked
+      — a prompt, not a wall. `RootView` offers the unlock sheet once per launch when the account has
+      a vault this device cannot open; dismissing it leaves a banner on the library, an Unlock button
+      on any original that fails to open, and a reworded refusal from the importer. The timeline keeps
+      browsing throughout, because the grid draws plaintext cover thumbnails and always could.
 
 **Flag:** none — nothing writes to the cloud before this exists.
+
+**Status (2026-08-18):** all seven deliverables are implemented; 149 unit tests pass. Two things are
+**not** verified and cannot be from inside this repository:
+
+- **Passkey unlock needs a server-side file.** A passkey enrolled on the web is bound to
+  `www.getneutrino.app` as its relying party, and iOS hands this app such a credential only once that
+  domain's `apple-app-site-association` names the app under a `webcredentials` section.
+  `static/apple-app-site-association` in the `neutrino` repository currently has an `applinks` section
+  only, and does not list `com.neutrino.photos` at all. The entitlement is in place here; until the
+  AASA catches up, an assertion fails with a domain error and the screen falls back to the password —
+  which is why the passkey button is never the only option offered.
+- **Manual verification steps 1–7 have not been run.** They need a real Neutrino account with a vault,
+  and step 6 needs a physical device. The unit suite covers the crypto and the state machine; it says
+  nothing about what `AfterFirstUnlock` does on real hardware after a reboot.
 
 **Manual verification**
 

@@ -165,11 +165,16 @@ private struct MediaPage: View {
     @Binding var showsChrome: Bool
 
     @EnvironmentObject private var content: MediaContentService
+    @EnvironmentObject private var vault: KeyVaultService
 
     @State private var image: UIImage?
     @State private var player: AVPlayer?
     @State private var error: String?
     @State private var isLoading = false
+    /// Set when the failure was specifically "no key on this device", which is the one failure with
+    /// something the user can do about it right here.
+    @State private var isLocked = false
+    @State private var showsUnlock = false
 
     /// Committed zoom, and the live pinch on top of it. Split so a gesture that ends below 1×
     /// springs back rather than leaving the picture smaller than the screen.
@@ -195,6 +200,18 @@ private struct MediaPage: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .task(id: item.id) { await load() }
+        .sheet(isPresented: $showsUnlock) {
+            VaultUnlockView(onUnlocked: {
+                // Clear the failure so `load()` runs again for this page when the sheet closes.
+                error = nil
+                isLocked = false
+            })
+            .environmentObject(vault)
+        }
+        .onChange(of: showsUnlock) { isPresented in
+            guard !isPresented, error == nil else { return }
+            Task { await load() }
+        }
     }
 
     // MARK: - Photo
@@ -249,6 +266,11 @@ private struct MediaPage: View {
                 .font(.footnote)
                 .multilineTextAlignment(.center)
                 .padding(.horizontal, 32)
+            if isLocked {
+                Button("Unlock") { showsUnlock = true }
+                    .buttonStyle(.borderedProminent)
+                    .padding(.top, 4)
+            }
         }
         .foregroundStyle(.white)
     }
@@ -272,6 +294,10 @@ private struct MediaPage: View {
             } else {
                 image = try await content.image(for: item)
             }
+        } catch let error as MediaContentError {
+            // "No key on this device" is the one failure here with a next step, so it gets one.
+            if case .noEncryptionKey = error { isLocked = true }
+            self.error = error.localizedDescription
         } catch {
             self.error = error.localizedDescription
         }

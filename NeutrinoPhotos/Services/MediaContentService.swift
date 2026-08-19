@@ -58,11 +58,6 @@ final class MediaContentService: ObservableObject {
 
     // MARK: - Private
 
-    private static let sodium = Sodium()
-
-    /// The secretstream header is 24 bytes and prefixes every ciphertext Neutrino writes.
-    private static let secretStreamHeaderSize = 24
-
     private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "NeutrinoPhotos",
                                 category: "MediaContentService")
 
@@ -111,7 +106,10 @@ final class MediaContentService: ObservableObject {
             return ciphertext
         }
         let dek = try unsealDEK(sealedDEK)
-        let plaintext = Data(try decryptToBytes(data: ciphertext, dek: dek))
+        // One push covering the whole file — what this app and the web client both write today. The
+        // chunked framing `MediaCrypto` can also read is announced in a file's encrypted metadata,
+        // and nothing writes it until the large-video path needs it.
+        let plaintext = Data(try MediaCrypto.decrypt(ciphertext, dek: dek))
         logger.debug("originalData: \(item.fileID, privacy: .public) (\(plaintext.count) bytes)")
         return plaintext
     }
@@ -175,11 +173,10 @@ final class MediaContentService: ObservableObject {
     ///   including this app's.
     func upload(data: Data, fileName: String, mimeType: String, thumbnailBase64: String?,
                 onProgress: (@MainActor (Double) -> Void)? = nil) async throws -> String {
-        let xcss = Self.sodium.secretStream.xchacha20poly1305
-        let dek: Bytes = xcss.key()
-        let ciphertext = try encrypt(bytes: Array(data), dek: dek, xcss: xcss)
-        let encryptedMetadata = try encryptMetadata(name: fileName, mimeType: mimeType,
-                                                    dek: dek, xcss: xcss)
+        let dek = MediaCrypto.newDEK()
+        let ciphertext = try MediaCrypto.encrypt(Bytes(data), dek: dek)
+        let encryptedMetadata = try MediaCrypto.encryptMetadata(name: fileName, mimeType: mimeType,
+                                                                dek: dek)
         let sealedFileKey = try sealDEK(dek)
 
         var form = MultipartFormBody()
@@ -221,89 +218,37 @@ final class MediaContentService: ObservableObject {
         logger.debug("cache cleared")
     }
 
-    // MARK: - Crypto (internal, for unit testing)
+    // MARK: - Crypto
+    //
+    // The primitives themselves live in `MediaCrypto`, which has no actor and no networking so it
+    // can be called off the main thread and asserted on its own. What stays here is the part that
+    // needs the Keychain: which key pair a DEK is sealed to.
 
-    /// Encrypts bytes as `[24-byte header][ciphertext]` using an XChaCha20-Poly1305 secretstream.
-    func encrypt(bytes: Bytes, dek: Bytes, xcss: SecretStream.XChaCha20Poly1305) throws -> Data {
-        guard let stream = xcss.initPush(secretKey: dek) else { throw MediaContentError.encryptionFailed }
-        let header = stream.header()
-        guard let cipher = stream.push(message: bytes, tag: .FINAL) else {
-            throw MediaContentError.encryptionFailed
-        }
-        return Data(header + cipher)
-    }
-
-    /// Reverses ``encrypt(bytes:dek:xcss:)``.
-    func decryptToBytes(data: Data, dek: Bytes) throws -> Bytes {
-        guard data.count > Self.secretStreamHeaderSize else {
-            logger.error("decrypt: data too short (\(data.count) bytes)")
-            throw MediaContentError.decryptionFailed
-        }
-        let header = Array(data.prefix(Self.secretStreamHeaderSize))
-        let ciphertext = Array(data.dropFirst(Self.secretStreamHeaderSize))
-        let xcss = Self.sodium.secretStream.xchacha20poly1305
-        guard let pull = xcss.initPull(secretKey: dek, header: header) else {
-            logger.error("decrypt: initPull failed — wrong key length or corrupt header")
-            throw MediaContentError.decryptionFailed
-        }
-        guard let (plaintext, _) = pull.pull(cipherText: ciphertext) else {
-            logger.error("decrypt: authentication failed — wrong DEK or corrupted content")
-            throw MediaContentError.decryptionFailed
-        }
-        return plaintext
-    }
-
-    /// Encrypts `{ name, mimeType }` with the DEK, matching the web app's `encryptMetadata()`.
-    func encryptMetadata(name: String, mimeType: String, dek: Bytes,
-                         xcss: SecretStream.XChaCha20Poly1305) throws -> String {
-        let dict: [String: String] = ["name": name, "mimeType": mimeType]
-        guard let json = try? JSONSerialization.data(withJSONObject: dict, options: [.sortedKeys]) else {
-            throw MediaContentError.encryptionFailed
-        }
-        guard let stream = xcss.initPush(secretKey: dek) else { throw MediaContentError.encryptionFailed }
-        let header = stream.header()
-        guard let cipher = stream.push(message: Array(json), tag: .FINAL),
-              let b64 = Self.sodium.utils.bin2base64(header + cipher, variant: .URLSAFE_NO_PADDING) else {
-            throw MediaContentError.encryptionFailed
-        }
-        return b64
-    }
-
-    /// Seals `dek` to the caller's stored Curve25519 public key (`crypto_box_seal`).
+    /// Seals `dek` to the account's stored Curve25519 public key (`crypto_box_seal`).
     func sealDEK(_ dek: Bytes) throws -> String {
-        guard let pubKeyString = KeychainService.load(forKey: KeyImportService.publicKeyKeychainKey),
-              let pubKeyData = Data(base64URLEncoded: pubKeyString) else {
+        guard let publicKey = Self.storedKey(KeyImportService.publicKeyKeychainKey) else {
             throw MediaContentError.noEncryptionKey
         }
-        guard let sealed = Self.sodium.box.seal(message: dek, recipientPublicKey: Array(pubKeyData)),
-              let b64 = Self.sodium.utils.bin2base64(sealed, variant: .URLSAFE_NO_PADDING) else {
-            throw MediaContentError.encryptionFailed
-        }
-        return b64
+        return try MediaCrypto.seal(dek: dek, toPublicKey: publicKey)
     }
 
-    /// Reverses ``sealDEK(_:)`` using the caller's stored private key (`crypto_box_seal_open`).
+    /// Reverses ``sealDEK(_:)`` with the stored private key (`crypto_box_seal_open`).
     func unsealDEK(_ sealedBase64: String) throws -> Bytes {
-        guard let pubKeyString = KeychainService.load(forKey: KeyImportService.publicKeyKeychainKey),
-              let pubKeyData = Data(base64URLEncoded: pubKeyString),
-              let privKeyString = KeychainService.load(forKey: KeyImportService.privateKeyKeychainKey),
-              let privKeyData = Data(base64URLEncoded: privKeyString) else {
+        guard let publicKey = Self.storedKey(KeyImportService.publicKeyKeychainKey),
+              let secretKey = Self.storedKey(KeyImportService.privateKeyKeychainKey) else {
             logger.error("unsealDEK: no stored key pair, or the stored key is not valid Base64URL")
             throw MediaContentError.noEncryptionKey
         }
-        guard let sealedBytes = Self.sodium.utils.base642bin(sealedBase64, variant: .URLSAFE_NO_PADDING) else {
-            logger.error("unsealDEK: sealed key is not valid Base64URL")
-            throw MediaContentError.decryptionFailed
+        do {
+            return try MediaCrypto.openDEK(sealedBase64, publicKey: publicKey, secretKey: secretKey)
+        } catch {
+            logger.error("unsealDEK: the seal was not made to this device's public key")
+            throw error
         }
-        guard let dek: Bytes = Self.sodium.box.open(
-            anonymousCipherText: sealedBytes,
-            recipientPublicKey: Array(pubKeyData),
-            recipientSecretKey: Array(privKeyData)
-        ) else {
-            logger.error("unsealDEK: seal was not made to this device's public key")
-            throw MediaContentError.decryptionFailed
-        }
-        return dek
+    }
+
+    private static func storedKey(_ keychainKey: String) -> Bytes? {
+        KeychainService.load(forKey: keychainKey).flatMap(KeyVaultCrypto.decodeBase64URL)
     }
 
     // MARK: - Private helpers
@@ -371,18 +316,4 @@ private struct APIKeyResponse: Decodable {
 
 private struct APIStoreKeyRequest: Encodable {
     let encryptedFileKey: String
-}
-
-// MARK: - Data + Base64URL
-
-extension Data {
-    /// Decodes a Base64URL string (no padding), which is how Neutrino returns sealed keys.
-    init?(base64URLEncoded string: String) {
-        var s = string
-            .replacingOccurrences(of: "-", with: "+")
-            .replacingOccurrences(of: "_", with: "/")
-        let remainder = s.count % 4
-        if remainder != 0 { s += String(repeating: "=", count: 4 - remainder) }
-        self.init(base64Encoded: s)
-    }
 }

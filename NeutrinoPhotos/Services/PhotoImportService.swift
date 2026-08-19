@@ -55,6 +55,11 @@ final class PhotoImportService: ObservableObject {
     private let settings: AppSettings
     private let monitor: NetworkMonitor
 
+    /// Consulted only to explain *why* there is no key — "unlock" and "import a key file" are very
+    /// different instructions and guessing wrong sends the user to the wrong screen. The precondition
+    /// itself is still the Keychain: a key that got here by any route is a key that works.
+    private weak var vault: KeyVaultService?
+
     // MARK: - Private
 
     private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "NeutrinoPhotos",
@@ -78,11 +83,13 @@ final class PhotoImportService: ObservableObject {
 
     init(content: MediaContentService, library: PhotoLibraryService,
          settings: AppSettings, monitor: NetworkMonitor,
+         vault: KeyVaultService? = nil,
          defaults: UserDefaults = .standard) {
         self.content = content
         self.library = library
         self.settings = settings
         self.monitor = monitor
+        self.vault = vault
         self.defaults = defaults
         self.fingerprints = Set(defaults.stringArray(forKey: Self.fingerprintsKey) ?? [])
     }
@@ -98,7 +105,7 @@ final class PhotoImportService: ObservableObject {
         guard KeyImportService.hasStoredKeys() else {
             // Refused rather than attempted: an upload without a key would store bytes nothing can
             // ever decrypt, which is worse than not uploading them.
-            blockedReason = "Import your encryption key before uploading photos."
+            blockedReason = missingKeyReason
             return
         }
         guard monitor.shouldUpload(wifiOnly: settings.wifiOnlyUploads) else {
@@ -127,6 +134,20 @@ final class PhotoImportService: ObservableObject {
             self.isImporting = false
             self.task = nil
             self.persistFingerprints()
+        }
+    }
+
+    /// Why an import cannot start, worded for the route back.
+    ///
+    /// An account with a vault is one unlock away; an account without one needs a key file, and
+    /// telling somebody to "unlock" when there is nothing to unlock sends them looking for a
+    /// password that does not exist.
+    var missingKeyReason: String {
+        switch vault?.status {
+        case .locked, .unknown, .unreachable, .none:
+            return "Unlock your encryption key before uploading photos."
+        case .noVault, .unlocked:
+            return "Import your encryption key before uploading photos."
         }
     }
 

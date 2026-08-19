@@ -9,12 +9,14 @@ struct LibraryView: View {
     @EnvironmentObject private var library: PhotoLibraryService
     @EnvironmentObject private var settings: AppSettings
     @EnvironmentObject private var importer: PhotoImportService
+    @EnvironmentObject private var vault: KeyVaultService
 
     /// What the picker handed back. Cleared as soon as the import starts so picking the same
     /// photographs twice in a row still fires — an unchanged selection is not a changed binding.
     @State private var pickerSelection: [PhotosPickerItem] = []
     @State private var viewerStart: MediaItem?
     @State private var hasLoaded = false
+    @State private var showsUnlock = false
 
     // MARK: - Body
 
@@ -45,6 +47,10 @@ struct LibraryView: View {
         }
         .fullScreenCover(item: $viewerStart) { start in
             PhotoDetailView(items: items, initialID: start.id)
+        }
+        .sheet(isPresented: $showsUnlock) {
+            VaultUnlockView()
+                .environmentObject(vault)
         }
     }
 
@@ -185,7 +191,24 @@ struct LibraryView: View {
                 banner("\(importer.failures.count) item(s) failed to upload.",
                        systemImage: "exclamationmark.circle", tint: .red)
             }
-            if !KeyImportService.hasStoredKeys() {
+            lockedBanner
+            if let error = library.error {
+                banner(error, systemImage: "wifi.exclamationmark", tint: .red)
+            }
+        }
+    }
+
+    /// The locked state, as the timeline shows it.
+    ///
+    /// A banner rather than a wall: the grid below is drawn from plaintext cover thumbnails stored
+    /// beside each Drive file, so the library is genuinely browsable without a key. What is missing
+    /// is originals and uploads, and this says which of the two routes back applies — unlocking a
+    /// vault, or importing a key file for an account that has none.
+    @ViewBuilder
+    private var lockedBanner: some View {
+        if !KeyImportService.hasStoredKeys() {
+            switch vault.status {
+            case .noVault:
                 NavigationLink {
                     KeyImportView()
                 } label: {
@@ -193,10 +216,23 @@ struct LibraryView: View {
                            systemImage: "key", tint: .accentColor)
                 }
                 .buttonStyle(.plain)
+            case .locked, .unknown, .unreachable, .unlocked:
+                Button {
+                    showsUnlock = true
+                } label: {
+                    banner("Unlock your encryption key to open and upload photos.",
+                           systemImage: "lock", tint: .accentColor)
+                }
+                .buttonStyle(.plain)
             }
-            if let error = library.error {
-                banner(error, systemImage: "wifi.exclamationmark", tint: .red)
+        } else if vault.keyBelongsToAnotherAccount {
+            Button {
+                showsUnlock = true
+            } label: {
+                banner("The key on this device belongs to a different account. Unlock to replace it.",
+                       systemImage: "exclamationmark.triangle", tint: .orange)
             }
+            .buttonStyle(.plain)
         }
     }
 

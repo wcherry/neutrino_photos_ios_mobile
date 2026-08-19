@@ -13,8 +13,8 @@ enum FeatureFlags {
     /// Neutrino authentication: the OAuth PKCE login, token refresh, device registration.
     static let authentication: Bool = true
 
-    /// End-to-end encryption: importing the key pair, sealing a per-file key on upload, unsealing
-    /// it to open an original.
+    /// End-to-end encryption: unlocking the account's key vault, importing a key pair by file,
+    /// sealing a per-file key on upload, and unsealing it to open an original.
     static let encryption: Bool = true
 
     /// The photo timeline: the library grid, grouped by day / month / year.

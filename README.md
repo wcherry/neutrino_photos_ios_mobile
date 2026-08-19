@@ -19,16 +19,18 @@ scripts/run_simulator.sh              # build, install, launch on a simulator
 scripts/run_simulator.sh --physical   # ... on a paired iPhone
 ```
 
-Sign in with a Neutrino account, then import the account's encryption key (Settings > Encryption, or
-the banner on the library). The key file is the JSON the web app exports from its own
-Settings > Encryption page.
+Sign in with a Neutrino account. If the account has an encryption vault the app offers to unlock it
+straight away — the encryption password (or recovery code, or passkey) set on the web opens the same
+key here. An account with no vault imports the key file instead: the JSON the web app exports from
+its own Settings > Encryption page, chosen in the app or simply tapped in Files.
 
 ## What This Build Does
 
 | Area | Features | Status |
 |------|----------|--------|
 | Authentication | OAuth PKCE login, token refresh, device registration, account profile, sign out | COMPLETE |
-| Encryption | Key import (file or paste), Keychain storage, per-file key sealing and unsealing | COMPLETE |
+| Encryption | Vault unlock (password, recovery code, passkey), key import (file, paste, or tapped), Keychain storage, per-file key sealing and unsealing, locked state | COMPLETE |
+| Devices | The account's signed-in devices, when each registered, revoking one | COMPLETE |
 | Timeline | Grid grouped by day / month / year, capture-date ordering, pull to refresh | COMPLETE |
 | Viewer | Full screen, pinch and double-tap zoom, swipe between items, info panel | COMPLETE |
 | Video | Playback of the decrypted original | COMPLETE |
@@ -51,9 +53,16 @@ search, places, people, memories, editing, sharing, and Universal Links. Each is
 NeutrinoPhotosApp        composition root — every service constructed once, injected explicitly
 ├── APIClient            all authorized HTTP: token refresh, status checks, JSON, uploads
 ├── AuthService          OAuth PKCE (login → authorize → token), refresh, /auth/me, logout
+├── KeyVaultService      /api/v1/auth/keyvault — unlock the account key, and this device's lock state
+│   ├── KeyVaultCrypto   Argon2id, the secretbox envelope, identity verification
+│   └── PasskeyPRFAuth…  the WebAuthn PRF assertion behind a passkey unlock (iOS 18+)
+├── KeyImportService     the key file path, and the only place keys are stored
+├── KeyFileRouter        a .json key file handed to the app from outside
+├── DeviceSessionService /api/v1/auth/sessions — the account's devices
 ├── PhotoLibraryService  /api/v1/photos — the library, favorites, archive, trash, registration
 ├── AlbumService         /api/v1/albums
 ├── MediaContentService  download + decrypt an original; encrypt + upload a new one
+│   └── MediaCrypto      the primitives: one-shot and streaming, DEK sealing, metadata
 ├── PhotoImportService   picker → prepare → upload → register, one item at a time
 ├── NetworkMonitor       connectivity and whether the path is metered
 └── AppSettings          preferences, in UserDefaults
@@ -83,6 +92,36 @@ full size is the first moment an original is fetched, unsealed, and decrypted.
 
 A file with no stored key ref is served as it stands: that is a picture uploaded before E2EE, and
 the web client makes the same allowance, so both agree on which files are readable.
+
+### Getting the key onto the device
+
+Two routes, and the app has to be honest about which one applies. An account with a **key vault** has
+its identity key stored encrypted under a master key, which is itself wrapped once per unlock method —
+an encryption password, a recovery code, a passkey. `KeyVaultService` fetches that envelope, unwraps
+it with whichever secret the user has, checks the recovered key really is the one the vault advertises,
+and hands it to `KeyImportService`. Nothing downstream knows or cares which route a key arrived by.
+
+The master key is not kept. It exists for the moment it takes to unwrap the identity; what lands in
+the Keychain is the identity itself, under `kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly` —
+*AfterFirstUnlock* so an upload running in the background can still seal a file key with the phone in
+a pocket, *ThisDeviceOnly* so an end-to-end encryption key never rides an iCloud backup to a device
+nobody unlocked it on.
+
+An account created before the vault existed has no password to type, and gets the **key file** path
+instead: chosen in the app, pasted, or simply tapped in Files — the app claims `.json` and consumes
+the URL rather than only declaring the type.
+
+### Locked is not blocked
+
+Signed in without the key is a normal state, not an error screen. The timeline draws cover thumbnails,
+so a locked library browses exactly as well as an unlocked one; what is missing is originals and
+uploads. So the app prompts once per launch, and after that says so where it matters — a banner on the
+library, an Unlock button on an original that would not open, and an importer that refuses with the
+instruction that actually applies ("unlock" for an account with a vault, "import" for one without).
+
+The one case worth shouting about is a key from a *different* account, left behind by signing out and
+into another. Unnoticed, that presents as every photograph failing to decrypt one at a time;
+`KeyVaultService` compares the stored public key against the vault's and says so instead.
 
 ### Capture dates
 
@@ -125,6 +164,14 @@ creates, renames, and deletes them, and adds photographs to them from the viewer
 screen why a card does not open. `AlbumService.photos(in:)` is the one place that changes when the
 endpoint lands, and a test asserts the gap so it fails the day it closes.
 
+**Passkey unlock is written but unproven.** `PasskeyPRFAuthenticator` performs the WebAuthn PRF
+assertion on iOS 18+, and `webcredentials:` is in the entitlement. iOS still will not hand this app a
+passkey registered at `www.getneutrino.app` until that domain's `apple-app-site-association` names
+`com.neutrino.photos` under a `webcredentials` section — a file in the server repository, which today
+carries `applinks` only. Until it does, the assertion fails with a domain error and the unlock screen
+falls back to the password, which is why a passkey is offered beside the other methods and never
+instead of them.
+
 **No automatic backup.** `PhotosPicker` selects out of process, which is why the app needs no
 photo-library permission and never sees the rest of the roll. Watching for new photographs needs
 `PHPhotoLibrary`, its permission prompt, and `BGTaskScheduler` — that is `FeatureFlags.automaticBackup`.
@@ -139,9 +186,16 @@ xcodebuild test -project NeutrinoPhotos.xcodeproj -scheme NeutrinoPhotos \
   -destination "platform=iOS Simulator,name=iPhone 17 Pro,OS=latest"
 ```
 
-79 tests. HTTP is exercised end to end against `MockURLProtocol` — real requests, real decoding, real
+149 tests. HTTP is exercised end to end against `MockURLProtocol` — real requests, real decoding, real
 status handling — rather than behind a protocol seam. The crypto is *not* mocked: `TestKeys` installs
 a genuine X25519 pair, so the seal / unseal / secretstream round trip is asserted for what it is.
+
+The vault tests go one step further and assert against the *other* implementation. `WebVault` holds a
+key vault produced by the web client's own `hash-wasm` and `libsodium-wrappers` over fixed inputs, and
+the tests unlock it here. A round trip through this app alone would pass just as happily with both
+halves wrong in the same direction — and the failure that matters is an account that unlocks in the
+browser and not on the phone. If one of those assertions fails, regenerate the fixture from
+`web/packages/e2e-crypto`; do not edit the constants.
 
 ## Deployment
 

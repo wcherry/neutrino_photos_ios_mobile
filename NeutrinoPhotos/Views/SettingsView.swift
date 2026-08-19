@@ -11,10 +11,10 @@ struct SettingsView: View {
     @EnvironmentObject private var content: MediaContentService
     @EnvironmentObject private var importer: PhotoImportService
     @EnvironmentObject private var monitor: NetworkMonitor
+    @EnvironmentObject private var vault: KeyVaultService
 
     @State private var deviceName = DeviceIdentity.deviceName
     @State private var showsSignOutConfirmation = false
-    @State private var showsKeyRemovalConfirmation = false
     @State private var cacheSize: Int64 = 0
 
     // MARK: - Body
@@ -42,12 +42,6 @@ struct SettingsView: View {
             Button("Sign Out", role: .destructive) { authService.logout() }
         } message: {
             Text("Your encryption key stays on this device so you don't have to import it again.")
-        }
-        .confirmationDialog("Remove the encryption key from this device?",
-                            isPresented: $showsKeyRemovalConfirmation, titleVisibility: .visible) {
-            Button("Remove Key", role: .destructive) { KeyImportService.removeKeys() }
-        } message: {
-            Text("Photos already uploaded stay encrypted and unreadable here until you import the key again.")
         }
     }
 
@@ -98,13 +92,12 @@ struct SettingsView: View {
 
     private var encryptionSection: some View {
         Section {
-            if KeyImportService.hasStoredKeys() {
-                LabeledContent("Key", value: "Imported")
-                NavigationLink("Replace key") { KeyImportView() }
-                Button("Remove key", role: .destructive) { showsKeyRemovalConfirmation = true }
-            } else {
-                NavigationLink("Import encryption key") { KeyImportView() }
+            NavigationLink {
+                EncryptionSettingsView()
+            } label: {
+                LabeledContent("Encryption", value: keyStateDescription)
             }
+            NavigationLink("Devices") { DevicesView() }
         } header: {
             Text("Encryption")
         } footer: {
@@ -113,6 +106,16 @@ struct SettingsView: View {
                  Browsing the timeline works without a key — grid previews are stored unencrypted \
                  with each file — but opening an original needs one.
                  """)
+        }
+    }
+
+    private var keyStateDescription: String {
+        switch vault.status {
+        case .unlocked:    return "Unlocked"
+        case .locked:      return "Locked"
+        case .noVault:     return "No key"
+        case .unreachable: return KeyImportService.hasStoredKeys() ? "Unlocked" : "Unknown"
+        case .unknown:     return "Checking…"
         }
     }
 

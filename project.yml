@@ -39,9 +39,18 @@ targets:
         # document served from the domain — see `deploy/apple-app-site-association` in the Drive
         # repository — not by this list. The app ignores inbound links until FeatureFlags.appLinks
         # is turned on and a router exists to handle them.
+        #
+        # `webcredentials:` is what lets the vault's passkey unlock work. A passkey enrolled on the
+        # web is bound to that page's domain as its relying party, and iOS will only hand this app
+        # such a credential once the domain's apple-app-site-association names it under
+        # `webcredentials` — a server-side file, not something this project can supply. Until it
+        # does, a passkey assertion fails with a domain error and `VaultUnlockView` falls back to
+        # the password path, which is why the option is offered but never the only one.
         com.apple.developer.associated-domains:
           - applinks:www.getneutrino.app
           - applinks:getneutrino.app
+          - webcredentials:www.getneutrino.app
+          - webcredentials:getneutrino.app
     info:
       path: NeutrinoPhotos/Info.plist
       properties:

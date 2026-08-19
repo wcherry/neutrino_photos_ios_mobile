@@ -56,6 +56,25 @@ final class PhotoImportServiceTests: XCTestCase {
         XCTAssertFalse(KeyImportService.hasStoredKeys())
     }
 
+    func testTheRefusalNamesTheRouteBackThatActuallyApplies() async {
+        // "Unlock" and "import a key file" send the user to two different screens, and only one of
+        // them exists for a given account. Guessing wrong is a dead end.
+        let api = APIClient(session: MockURLProtocol.makeSession())
+        let vault = KeyVaultService(api: api)
+        let sut = PhotoImportService(content: MediaContentService(api: api),
+                                     library: PhotoLibraryService(api: api),
+                                     settings: settings, monitor: monitor, vault: vault,
+                                     defaults: defaults)
+
+        MockURLProtocol.respond(data: WebVault.responseJSON())
+        await vault.refresh()
+        XCTAssertEqual(sut.missingKeyReason, "Unlock your encryption key before uploading photos.")
+
+        MockURLProtocol.respond(json: "{}", statusCode: 404)
+        await vault.refresh()
+        XCTAssertEqual(sut.missingKeyReason, "Import your encryption key before uploading photos.")
+    }
+
     func testWifiOnlyBlocksAnImportOnCellular() {
         TestKeys.install()
         settings.wifiOnlyUploads = true

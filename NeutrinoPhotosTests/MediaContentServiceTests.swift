@@ -34,32 +34,12 @@ final class MediaContentServiceTests: XCTestCase {
     }
 
     // MARK: - Crypto
-
-    func testEncryptDecryptRoundTrip() throws {
-        let sodium = Sodium()
-        let xcss = sodium.secretStream.xchacha20poly1305
-        let dek = xcss.key()
-        let original = Data((0..<4096).map { UInt8($0 % 251) })
-
-        let ciphertext = try sut.encrypt(bytes: Array(original), dek: dek, xcss: xcss)
-        let plaintext = Data(try sut.decryptToBytes(data: ciphertext, dek: dek))
-
-        XCTAssertEqual(plaintext, original)
-        XCTAssertEqual(ciphertext.count, original.count + 24 + 17,
-                       "24-byte secretstream header plus the 17-byte tag+MAC the push adds")
-    }
-
-    func testDecryptWithTheWrongKeyFails() throws {
-        let sodium = Sodium()
-        let xcss = sodium.secretStream.xchacha20poly1305
-        let ciphertext = try sut.encrypt(bytes: Array("hello".utf8), dek: xcss.key(), xcss: xcss)
-
-        XCTAssertThrowsError(try sut.decryptToBytes(data: ciphertext, dek: xcss.key()))
-    }
+    //
+    // The primitives themselves are `MediaCryptoTests`' business. What is asserted here is the part
+    // this service owns: which key pair a DEK is sealed to, and what happens when there isn't one.
 
     func testSealedKeyRoundTripsThroughTheStoredKeyPair() throws {
-        let sodium = Sodium()
-        let dek = sodium.secretStream.xchacha20poly1305.key()
+        let dek = MediaCrypto.newDEK()
 
         let sealed = try sut.sealDEK(dek)
         XCTAssertEqual(try sut.unsealDEK(sealed), dek)
@@ -67,9 +47,8 @@ final class MediaContentServiceTests: XCTestCase {
 
     func testSealingWithoutAKeyIsRefused() {
         TestKeys.remove()
-        let dek = Sodium().secretStream.xchacha20poly1305.key()
 
-        XCTAssertThrowsError(try sut.sealDEK(dek)) { error in
+        XCTAssertThrowsError(try sut.sealDEK(MediaCrypto.newDEK())) { error in
             XCTAssertEqual((error as? MediaContentError)?.errorDescription,
                            MediaContentError.noEncryptionKey.errorDescription)
         }
@@ -78,11 +57,9 @@ final class MediaContentServiceTests: XCTestCase {
     // MARK: - Reading
 
     func testOriginalDataDownloadsUnsealsAndDecrypts() async throws {
-        let sodium = Sodium()
-        let xcss = sodium.secretStream.xchacha20poly1305
-        let dek = xcss.key()
+        let dek = MediaCrypto.newDEK()
         let original = Data("a photograph, more or less".utf8)
-        let ciphertext = try sut.encrypt(bytes: Array(original), dek: dek, xcss: xcss)
+        let ciphertext = try MediaCrypto.encrypt(Bytes(original), dek: dek)
         let sealed = try sut.sealDEK(dek)
 
         MockURLProtocol.route([
@@ -109,7 +86,7 @@ final class MediaContentServiceTests: XCTestCase {
     }
 
     func testOpeningAnOriginalWithoutTheKeyPairFails() async throws {
-        let sealed = try sut.sealDEK(Sodium().secretStream.xchacha20poly1305.key())
+        let sealed = try sut.sealDEK(MediaCrypto.newDEK())
         TestKeys.remove()
         MockURLProtocol.route([
             ("/key", 200, Data(#"{"encrypted_file_key":"\#(sealed)"}"#.utf8)),
