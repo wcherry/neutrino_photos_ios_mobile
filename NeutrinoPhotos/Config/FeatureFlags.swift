@@ -44,14 +44,29 @@ enum FeatureFlags {
     /// contents — see ``Album`` — so this covers everything the API can currently do.
     static let albums: Bool = true
 
+    /// The media pipeline: the rendition ladder, the encrypted preview stored beside each original,
+    /// the size-capped caches of decrypted media on disk, and the SQLite library the timeline paints
+    /// from before the network answers.
+    ///
+    /// Not a switch anything branches on — it is here because the epic that built it is a fact
+    /// about this build that ``RoadmapView`` should be able to state. Turning it off would not
+    /// remove a screen; it would remove the thing every screen reads through.
+    static let mediaPipeline: Bool = true
+
     // MARK: - Not yet implemented
 
     /// Automatic background backup of new camera-roll items (`BGTaskScheduler`, upload queue,
     /// charging / Wi-Fi conditions). Import is manual until this lands.
     static let automaticBackup: Bool = false
 
-    /// Offline browsing: a local database, cached thumbnails and originals, and a queue that
-    /// drains when connectivity returns.
+    /// Offline browsing.
+    ///
+    /// Half of what this names now exists — see ``mediaPipeline``: the local database, the cached
+    /// thumbnails, and the cached originals, so a cold launch with no signal draws the timeline it
+    /// drew last time. What is still missing is the half that makes it *offline mode* rather than a
+    /// cache: a delta sync on a cursor, a queue that holds favourites, deletes, and album edits made
+    /// with no network and drains them in order, and a rule for what happens when two devices
+    /// changed the same thing. That is Epic 10, and half of it would be worse than none.
     static let offlineMode: Bool = false
 
     /// Search by date, filename, and metadata.

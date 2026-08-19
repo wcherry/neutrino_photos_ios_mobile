@@ -110,6 +110,50 @@ final class APIClient: ObservableObject {
         try await send(method: "GET", path: path)
     }
 
+    /// Downloads to a file rather than into memory, and moves it to `destination`.
+    ///
+    /// The difference matters at exactly one size: a 10 GB video fetched with ``data(path:)`` is
+    /// 10 GB of `Data`, and the phone does not have it. `URLSession`'s download task spools to disk
+    /// as the bytes arrive, so peak memory is a buffer regardless of the file. Everything large
+    /// goes through here; a two-megabyte photograph is not worth the extra file write.
+    ///
+    /// The temporary file `URLSession` hands back is deleted the moment the delegate returns, so
+    /// the move happens here rather than at the call site.
+    func download(path: String, to destination: URL,
+                  onProgress: (@MainActor (Double) -> Void)? = nil) async throws {
+        var request = try makeRequest(method: "GET", path: path)
+        try await authorize(&request)
+        logger.debug("--> GET (stream) \(request.url?.path ?? "?", privacy: .public)")
+
+        do {
+            let (temporaryURL, response): (URL, URLResponse)
+            if let onProgress {
+                let reporter = DownloadProgressReporter(onProgress)
+                (temporaryURL, response) = try await session.download(for: request, delegate: reporter)
+            } else {
+                (temporaryURL, response) = try await session.download(for: request)
+            }
+            guard let http = response as? HTTPURLResponse else { throw APIError.server(statusCode: 0) }
+            logger.debug("<-- \(http.statusCode) \(request.url?.path ?? "?", privacy: .public) (streamed)")
+            guard (200...299).contains(http.statusCode) else {
+                try? FileManager.default.removeItem(at: temporaryURL)
+                throw APIError.server(statusCode: http.statusCode)
+            }
+            if FileManager.default.fileExists(atPath: destination.path) {
+                try FileManager.default.removeItem(at: destination)
+            }
+            try FileManager.default.moveItem(at: temporaryURL, to: destination)
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch let error as URLError where error.code == .cancelled {
+            throw CancellationError()
+        } catch let error as APIError {
+            throw error
+        } catch {
+            throw APIError.network(underlying: error)
+        }
+    }
+
     /// Sends `body` and returns the response bytes.
     ///
     /// - Parameter onProgress: fraction of the bytes sent, 0 to 1, reported on the main actor.
@@ -143,6 +187,44 @@ final class APIClient: ObservableObject {
             throw CancellationError()
         } catch let error as URLError where error.code == .cancelled {
             // `URLSession` reports a cancelled task this way rather than as `CancellationError`.
+            throw CancellationError()
+        } catch let error as APIError {
+            throw error
+        } catch {
+            throw APIError.network(underlying: error)
+        }
+    }
+
+    /// The same, sending a file from disk rather than a `Data` in memory.
+    ///
+    /// `URLSession` streams the file as it goes, so an upload's peak memory is a buffer instead of
+    /// the whole body. That is what makes a multi-gigabyte video uploadable at all: the encrypted
+    /// copy is written to a temporary file chunk by chunk (``MediaCrypto/encryptStream(from:to:dek:chunkSize:)``)
+    /// and then handed to this, and neither half ever holds the video.
+    func upload(method: String, path: String, contentType: String, bodyFile: URL,
+                onProgress: (@MainActor (Double) -> Void)? = nil) async throws -> Data {
+        var request = try makeRequest(method: method, path: path)
+        request.setValue(contentType, forHTTPHeaderField: "Content-Type")
+        try await authorize(&request)
+
+        do {
+            let (data, response): (Data, URLResponse)
+            if let onProgress {
+                let reporter = UploadProgressReporter(onProgress)
+                (data, response) = try await session.upload(for: request, fromFile: bodyFile,
+                                                            delegate: reporter)
+            } else {
+                (data, response) = try await session.upload(for: request, fromFile: bodyFile)
+            }
+            guard let http = response as? HTTPURLResponse else { throw APIError.server(statusCode: 0) }
+            logger.debug("<-- \(http.statusCode) \(request.url?.path ?? "?", privacy: .public) (streamed)")
+            guard (200...299).contains(http.statusCode) else {
+                throw APIError.server(statusCode: http.statusCode)
+            }
+            return data
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch let error as URLError where error.code == .cancelled {
             throw CancellationError()
         } catch let error as APIError {
             throw error
@@ -229,4 +311,34 @@ final class UploadProgressReporter: NSObject, URLSessionTaskDelegate {
         let report = report
         Task { @MainActor in report(fraction) }
     }
+}
+
+// MARK: - DownloadProgressReporter
+
+/// The download-side counterpart to ``UploadProgressReporter``.
+///
+/// Separate because the callbacks are on different delegate protocols — and because a download of
+/// unknown length (`Content-Length` absent, which a streamed response is entitled to omit) reports
+/// -1 for the total, where an honest "still going" beats a fraction invented from nothing.
+final class DownloadProgressReporter: NSObject, URLSessionDownloadDelegate {
+
+    private let report: @MainActor (Double) -> Void
+
+    init(_ report: @escaping @MainActor (Double) -> Void) {
+        self.report = report
+    }
+
+    func urlSession(_ session: URLSession, downloadTask: URLSessionDownloadTask,
+                    didWriteData bytesWritten: Int64, totalBytesWritten: Int64,
+                    totalBytesExpectedToWrite: Int64) {
+        guard totalBytesExpectedToWrite > 0 else { return }
+        let fraction = min(1, max(0, Double(totalBytesWritten) / Double(totalBytesExpectedToWrite)))
+        let report = report
+        Task { @MainActor in report(fraction) }
+    }
+
+    /// Required by the protocol. The `async` download API takes the file from its own continuation,
+    /// so there is nothing to do here.
+    func urlSession(_ session: URLSession, downloadTask: URLSessionDownloadTask,
+                    didFinishDownloadingTo location: URL) {}
 }

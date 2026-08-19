@@ -12,10 +12,11 @@ struct SettingsView: View {
     @EnvironmentObject private var importer: PhotoImportService
     @EnvironmentObject private var monitor: NetworkMonitor
     @EnvironmentObject private var vault: KeyVaultService
+    @EnvironmentObject private var drive: PhotosDriveService
 
     @State private var deviceName = DeviceIdentity.deviceName
     @State private var showsSignOutConfirmation = false
-    @State private var cacheSize: Int64 = 0
+    @State private var storage: MediaContentService.StorageBreakdown?
 
     // MARK: - Body
 
@@ -30,11 +31,14 @@ struct SettingsView: View {
         }
         .navigationTitle("Settings")
         .task {
-            cacheSize = content.cacheSizeOnDisk()
+            storage = await content.storageBreakdown()
             // A second chance at the account: the launch attempt is the only other one, and it
             // happens exactly when a phone is most likely to still be off the network.
             if authService.profile == nil {
                 await authService.loadProfile()
+            }
+            if drive.quota == nil {
+                await drive.loadQuota()
             }
         }
         .confirmationDialog("Sign out of Neutrino Photos?",
@@ -123,17 +127,32 @@ struct SettingsView: View {
 
     private var storageSection: some View {
         Section {
-            LabeledContent("Decrypted videos on disk",
-                           value: ByteCountFormatter.string(fromByteCount: cacheSize, countStyle: .file))
+            if let quota = drive.quota {
+                LabeledContent("In your account", value: quota.formattedUsage)
+            }
+            LabeledContent("Photos and videos on this device", value: bytes(storage?.originals))
+            LabeledContent("Grid previews", value: bytes(storage?.thumbnails))
+            LabeledContent("Library index", value: bytes(storage?.database))
             Button("Clear cache") {
                 content.clearCache()
-                cacheSize = content.cacheSizeOnDisk()
+                Task { storage = await content.storageBreakdown() }
             }
+            .disabled((storage?.originals ?? 0) + (storage?.thumbnails ?? 0) == 0)
         } header: {
             Text("Storage")
         } footer: {
-            Text("Playing a video writes its decrypted copy to the temporary directory. Clearing removes it; the original stays in your account.")
+            Text("""
+                 Opening a photo or playing a video keeps its decrypted copy on this device so the \
+                 next look at it costs nothing. The cache is capped and the oldest items are \
+                 dropped first. Clearing it frees the space immediately — nothing is lost, since \
+                 every one of them is still in your account.
+                 """)
         }
+    }
+
+    private func bytes(_ count: Int64?) -> String {
+        guard let count else { return "—" }
+        return ByteCountFormatter.string(fromByteCount: count, countStyle: .file)
     }
 
     // MARK: - Account
@@ -192,6 +211,7 @@ struct SettingsView: View {
 private struct RoadmapView: View {
 
     private let planned: [(String, Bool)] = [
+        ("Local cache and library index", FeatureFlags.mediaPipeline),
         ("Automatic backup", FeatureFlags.automaticBackup),
         ("Offline browsing", FeatureFlags.offlineMode),
         ("Search", FeatureFlags.search),

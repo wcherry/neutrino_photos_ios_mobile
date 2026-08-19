@@ -85,10 +85,25 @@ Covers mvp.md §18 Phase 0.
       — decided and implemented; see the doc comments on `MediaContentService.upload` (root folder,
       no `folder_id`, two-step upload-then-register) and the README's "The library is Photos, the
       bytes are Drive".
-- [ ] Local database choice and schema (SQLite via GRDB, or Core Data — decide and justify;
+- [x] Local database choice and schema (SQLite via GRDB, or Core Data — decide and justify;
       the deciding factor is 100k-row timeline query performance, not familiarity)
+      — decided in Epic 3 and implemented as `LocalStore`: **SQLite directly, via the SDK's own
+      `SQLite3` module**. All three candidates are SQLite and answer the timeline query identically;
+      what differs is what else they bring. Core Data adds an object graph, faulting, and the
+      migration story most likely to lose somebody's data; GRDB is a third-party dependency for four
+      tables and eleven statements. The rule that keeps the choice honest is written on the type: no
+      query builder, no object mapping, no lazy loading — if this file ever wants those, it wants
+      GRDB. The timeline query is answered by `photo(is_trashed, is_archived, timeline_date DESC)`
+      with no sort step, and `LocalStoreTests` asserts a 2,000-row write and read.
 - [ ] Sync protocol: cursor/delta shape, conflict rule, tombstones
-- [ ] Thumbnail/rendition ladder: which sizes, generated where, cached where, evicted how
+- [x] Thumbnail/rendition ladder: which sizes, generated where, cached where, evicted how
+      — `MediaRendition` is the ladder and the table in its doc comment is the answer: 512 px
+      plaintext thumbnail on the Drive file for the grid, 2048 px **encrypted** preview as a second
+      Drive file for the viewer, original for zoom and export. Generated on the uploading device,
+      because the server holds ciphertext and has no key. Cached in `DiskCache` — capped, evicted
+      least-recently-used, `Library/Caches`, excluded from backup, file protection matching the
+      Keychain's. Every step falls back to the one below it, so nothing in the ladder is
+      load-bearing.
 - [ ] Background task architecture: `BGProcessingTask` vs `URLSession` background config,
       and which one owns the upload queue
 - [ ] Error/retry policy: which errors are retryable, backoff curve, poison-item handling
@@ -101,16 +116,21 @@ Covers mvp.md §18 Phase 0.
       two must agree. Epic 2 added the layer above it: the master key is what wraps the *identity*,
       and `KeyVaultCrypto` is where that envelope lives.
 
-**Status (verified 2026-08-18):** three of nine deliverables are done — and they are the three the
-app was *forced* to decide in order to ship the timeline, so they exist as working code rather than
-as prose. The other six are the ones an implementation can defer, and all six were: there is no
-local database anywhere in the tree (no GRDB, Core Data, or SQLite dependency), no sync cursor,
-no retry or backoff logic, and no background task registration. `FeatureFlags.offlineMode` and
-`FeatureFlags.automaticBackup` are `false` for exactly this reason.
+**Status (updated 2026-08-18, after Epic 3):** five of nine deliverables are done. The first three
+were the ones the app was *forced* to decide in order to ship the timeline; the local database and
+the rendition ladder were forced by Epic 3, and like the others they exist as working code rather
+than as prose — `LocalStore` and `MediaRendition`, both with their rationale on the type.
 
-`architecture.md` has not been written. Some of what belongs in it now lives in `README.md` and in
-the doc comments on `MediaContentService` — that covers the decided items but not the deferred ones,
-and it is not a substitute for the document the exit criteria name.
+Four remain, and they are the four an implementation can defer until the epic that needs them:
+the sync cursor and conflict rule (Epic 10), the background task architecture (Epic 7), and the
+error/retry policy (Epic 7 — there is still no backoff curve or poison-item handling anywhere in
+the tree). `FeatureFlags.offlineMode` and `FeatureFlags.automaticBackup` are `false` for exactly
+that reason.
+
+`architecture.md` has not been written. What belongs in it now lives in `README.md` and in the doc
+comments on `MediaContentService`, `MediaRendition`, `LocalStore`, and `DiskCache` — that covers
+the five decided items but not the four deferred ones, and it is not a substitute for the document
+the exit criteria name.
 
 **Exit criteria:** A reviewer can read `architecture.md` and correctly predict what Epic 3 and
 Epic 10 will look like without asking a question.
@@ -264,14 +284,82 @@ Covers mvp.md §4 Storage, §19 items 14.
 
 **Deliverables**
 
-- [ ] `PhotosDriveService` — Drive CRUD scoped to `type=photo`, modelled on `NotesDriveService`
-- [ ] Rendition generator: thumbnail (grid), preview (viewer), original (export)
-- [ ] Encrypted upload of original + renditions, streaming, memory-bounded
-- [ ] Encrypted download with local cache
-- [ ] `ThumbnailCache` — disk-backed, size-capped, LRU eviction
-- [ ] Local database from Epic 0, with the schema live and migrated
+- [x] `PhotosDriveService` — Drive CRUD scoped to `type=photo`, modelled on `NotesDriveService`
+      — the root listing (`/drive/folders/{userID}?type=photo`, where the root folder's id is the
+      caller's own user id), one file's record, rename, delete, the account quota, and the
+      renditions folder. It sits beside `PhotoLibraryService` rather than under it because the two
+      answer questions neither can answer for the other: the Photos API lists *photo records* and
+      knows nothing about bytes, the Drive listing lists *files* and includes images nothing ever
+      registered as a photograph. `unregisteredPhotoFiles(knownFileIDs:)` is the reconciliation, and
+      it is what Epic 6 will build "don't upload it twice" on.
+- [x] Rendition generator: thumbnail (grid), preview (viewer), original (export)
+      — `MediaRendition` names the three and `RenditionGenerator` makes them, entirely through
+      ImageIO: decoding a 12-megapixel photograph with `UIImage(data:)` to draw it 500 px wide holds
+      48 MB of bitmap to throw 47 of them away. A preview is only made when it would actually be
+      smaller than what it is a preview of — a screenshot or a web graphic gets none, and the same
+      rule governs both the upload side and the local fallback so a picture cannot be served as a
+      rendition on one device and as an original on another.
+- [x] Encrypted upload of original + renditions, streaming, memory-bounded
+      — two paths. A photograph goes up as it always did (one-shot secretstream, the format the web
+      client reads) and its 2048 px preview follows it into a `Photo Previews` subfolder, encrypted
+      under its own DEK. A subfolder because both library listings are root-scoped, so a rendition
+      filed there is invisible to them — which is the point. The second path takes a *file*:
+      `MediaCrypto.encryptStream` writes the ciphertext a chunk at a time, `MultipartFormBody.write`
+      copies it into the body through a fixed buffer, and `URLSession` streams that off disk. Peak
+      memory is a couple of megabytes whether the video is 30 seconds or 20 minutes, and
+      `PhotoImportService` now loads a video as a URL rather than as `Data` so the picker's half of
+      it is bounded too. A rendition upload that fails is logged and swallowed: the original is safe
+      by then, and refusing an import over a *preview* would trade the thing that matters for the
+      thing that does not.
+- [x] Encrypted download with local cache
+      — decrypted originals land in a capped `DiskCache`, so opening a photograph twice downloads it
+      once and a video plays from a file rather than from `Data`. Above 32 MB the download spools to
+      disk and decrypts there, reading the chunk framing out of the file's encrypted metadata first,
+      because a chunked stream and a single push are indistinguishable from their bytes and guessing
+      wrong fails authentication rather than reading short.
+- [x] `ThumbnailCache` — disk-backed, size-capped, LRU eviction
+      — two tiers over one `DiskCache`: an `NSCache` of decoded bitmaps that empties itself under
+      memory pressure, and 64 MB of JPEGs on disk that survives a relaunch. What it saves is not a
+      download (a cover thumbnail arrives inside the listing) but the decode, which is what a grid
+      pays for on every scroll pass.
+- [x] Local database from Epic 0, with the schema live and migrated
+      — `LocalStore`, and *live* rather than written-and-never-read: `PhotoLibraryService` paints the
+      timeline from it before the network is asked anything, and writes back after every listing and
+      every mutation. Migrations run off `user_version` and are append-only. It also holds the
+      rendition index, which has nowhere else to live — nothing on a photo record can point at a
+      rendition.
+
+**Flag:** `mediaPipeline` — true, and nothing branches on it. The epic is infrastructure every
+screen reads through rather than a screen of its own, so a `false` would not hide a feature, it
+would remove the floor. It is in `FeatureFlags` so `Settings › What's not here yet` can state it.
 
 **Exit criteria:** SHA-256 of a downloaded original equals the SHA-256 of what was uploaded.
+✅ `MediaContentServiceTests.testAnUploadedOriginalComesBackByteIdentical` — through both real
+paths, not a round trip of the crypto on its own: the bytes go out through the multipart upload,
+are pulled back out of the captured request body exactly as the server would have stored them, are
+served back through the download path, and are hashed at the far end.
+
+**Status (2026-08-18):** all six deliverables are implemented; 219 unit tests pass. What that suite
+covers and what it cannot:
+
+- **Covered, and worth knowing it is:** the exit criterion above; the streaming upload writing a
+  chunked stream *and saying so in its encrypted metadata* (a chunked file whose metadata forgot
+  `chunkSize` is one nothing can ever read back); the streaming download reading that framing back
+  and reproducing the file byte for byte; the cache serving a second read with no request at all;
+  LRU eviction dropping the least recently *used* rather than the oldest written; and a rendition
+  upload failing without taking the import with it.
+- **Not covered, and not coverable here:** manual verification steps 2–7 have not been run. Step 3
+  is the one that matters most — a photograph uploaded by this app opening in **Neutrino Drive web**
+  — because a self-consistent round trip passes just as happily when both halves are wrong together.
+  Step 6 (memory flat in Instruments during a 4K video upload) is asserted structurally by the tests
+  and by construction, but "no allocation proportional to file size" is a claim only Instruments on
+  a device can settle. Step 5's export has no UI yet — saving an original back out is Epic 5's
+  save-to-device — so it is the unit-test harness that step 1 explicitly allows.
+- **One deliberate deviation to note:** the preview rendition is a second Drive file in a
+  `Photo Previews` folder, which today's web client neither writes nor reads. It ignores it — the
+  folder is outside the root-scoped listing the web library uses — but a user browsing Drive will
+  see the folder. Deleting it costs them nothing: every rendition is re-derivable from its original,
+  and every read falls back.
 
 **Manual verification**
 

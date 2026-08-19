@@ -11,14 +11,19 @@ import SwiftUI
 /// An item with no thumbnail is one the uploading client sent none for (every video, today) or one
 /// whose server-side thumbnail job has not run yet. It draws its symbol rather than a blank square,
 /// so the grid stays legible instead of gaining holes.
+///
+/// The decode goes through ``ThumbnailCache`` rather than happening here, so a cell scrolled back
+/// into view redraws from a bitmap the app already has instead of decoding the same JPEG again.
 struct PhotoThumbnailView: View {
 
     let item: MediaItem
     /// Drawn over the corner for favourites, as Apple Photos does.
     var showsBadges: Bool = true
 
-    /// Decoded once per cell rather than in `body`: `body` runs on every scroll pass, and a base64
-    /// decode plus a JPEG decode per frame is what turns a smooth grid into a stuttering one.
+    @EnvironmentObject private var thumbnails: ThumbnailCache
+
+    /// Held per cell rather than read in `body`: `body` runs on every scroll pass, and touching a
+    /// cache from it would be a lookup per frame.
     @State private var image: UIImage?
 
     var body: some View {
@@ -41,7 +46,12 @@ struct PhotoThumbnailView: View {
         .clipped()
         .contentShape(Rectangle())
         .overlay(alignment: .bottomLeading) { badges }
-        .task(id: item.thumbnailBase64) { await decode() }
+        // Keyed on the file *and* on whether it has a thumbnail at all, so a cell drawn before the
+        // server's thumbnail job has run redraws when the next listing brings one. Not keyed on the
+        // base64 itself: that is tens of kilobytes, compared on every scroll pass.
+        .task(id: ThumbnailIdentity(fileID: item.fileID, hasThumbnail: item.thumbnailBase64 != nil)) {
+            image = await thumbnails.image(for: item)
+        }
     }
 
     // MARK: - Badges
@@ -66,16 +76,12 @@ struct PhotoThumbnailView: View {
             .padding(4)
         }
     }
+}
 
-    // MARK: - Decoding
+// MARK: - ThumbnailIdentity
 
-    private func decode() async {
-        guard let data = item.thumbnailData else {
-            image = nil
-            return
-        }
-        // Off the main actor: a screenful of cells appearing at once is a screenful of JPEG decodes,
-        // and doing them inline stalls the scroll they were supposed to fill.
-        image = await Task.detached(priority: .userInitiated) { UIImage(data: data) }.value
-    }
+/// What has to change for a cell to fetch its picture again.
+private struct ThumbnailIdentity: Equatable {
+    let fileID: String
+    let hasThumbnail: Bool
 }

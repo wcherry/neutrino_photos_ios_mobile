@@ -1,3 +1,4 @@
+import CryptoKit
 import XCTest
 @testable import NeutrinoPhotos
 
@@ -158,6 +159,23 @@ final class ImagePreparationTests: XCTestCase {
         let image = try XCTUnwrap(UIImage(data: thumbnail))
         XCTAssertLessThanOrEqual(max(image.size.width, image.size.height),
                                  ImagePreparation.thumbnailMaximumPixels)
+    }
+
+    // MARK: - Fingerprints
+
+    func testAFileIsFingerprintedWithoutBeingReadIntoMemory() throws {
+        // The streaming hash is what a video gets: reading half a gigabyte into a `Data` to find
+        // out whether it has already been imported would defeat the point of the streaming upload
+        // it is standing in front of. It has to agree with the in-memory hash exactly, or the same
+        // item imported as a photograph and as a video would look like two different ones.
+        let url = makeTemporaryDirectory().appendingPathComponent("clip.mov")
+        let bytes = Data((0..<(3 << 20)).map { UInt8($0 % 251) })
+        try bytes.write(to: url)
+
+        let streamed = try PhotoImportService.fingerprint(ofFileAt: url)
+
+        let expected = SHA256.hash(data: bytes).map { String(format: "%02x", $0) }.joined()
+        XCTAssertEqual(streamed, expected)
     }
 
     // MARK: - Helpers

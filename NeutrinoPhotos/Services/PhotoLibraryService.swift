@@ -32,9 +32,19 @@ final class PhotoLibraryService: ObservableObject {
     /// When the library was last read from the server, for the timeline's status line.
     @Published private(set) var lastLoadedAt: Date?
 
+    /// True once the timeline has been painted from the device's own copy — so a caller can tell
+    /// "there is nothing in this library" from "nothing has been read yet", which are the same
+    /// empty grid and very different empty states.
+    @Published private(set) var isHydrated = false
+
     // MARK: - Dependencies
 
     private let api: APIClient
+
+    /// The device's cached copy of the library. Optional: a database that would not open is a
+    /// slower app, not a broken one, and every path here treats it as an accelerator rather than as
+    /// a source of truth.
+    private let store: LocalStore?
 
     // MARK: - Private
 
@@ -54,8 +64,9 @@ final class PhotoLibraryService: ObservableObject {
 
     // MARK: - Init
 
-    init(api: APIClient) {
+    init(api: APIClient, store: LocalStore? = nil) {
         self.api = api
+        self.store = store
     }
 
     #if DEBUG
@@ -105,6 +116,8 @@ final class PhotoLibraryService: ObservableObject {
     /// it to them (`list_photos` in `src/photos/photos/repository.rs`). Everything is fetched once
     /// and filtered on the device, so the Archive view and the Show Archived setting are both free.
     func load() async {
+        await hydrateIfNeeded()
+
         isLoading = true
         error = nil
         defer { isLoading = false }
@@ -115,8 +128,13 @@ final class PhotoLibraryService: ObservableObject {
             allItems = response.photos
             lastLoadedAt = Date()
             logger.debug("load succeeded: \(response.photos.count) items")
+            try? await store?.replaceLibrary(with: response.photos)
         } catch {
             logger.error("load failed: \(error, privacy: .public)")
+            // A failed refresh over a library that is already on screen is a stale timeline, not an
+            // empty one — the rows stay, and the error says why they are not newer. Reporting
+            // nothing at all would be worse: the user would be looking at yesterday believing it
+            // was today.
             self.error = error.localizedDescription
         }
     }
@@ -127,10 +145,46 @@ final class PhotoLibraryService: ObservableObject {
                 try await api.get("/api/v1/photos/trash", decoder: Self.decoder)
             trashItems = response.photos
             logger.debug("loadTrash succeeded: \(response.photos.count) items")
+            try? await store?.replaceTrash(with: response.photos)
         } catch {
             logger.error("loadTrash failed: \(error, privacy: .public)")
             self.error = error.localizedDescription
         }
+    }
+
+    // MARK: - The device's own copy
+
+    /// Paints the timeline from the local database before the network is asked anything.
+    ///
+    /// Runs once per launch and only while the library is empty, so a refresh never flickers back
+    /// through the cached rows on its way to the new ones. A cold launch on a slow connection shows
+    /// photographs immediately instead of a spinner; a cold launch with *no* connection shows them
+    /// too, which is as far as this goes — browsing an item, queueing a change, and reconciling
+    /// what happened while the phone was away are Epic 10's, and half of an offline mode is worse
+    /// than none.
+    func hydrateIfNeeded() async {
+        guard !isHydrated, allItems.isEmpty, let store else {
+            isHydrated = true
+            return
+        }
+        isHydrated = true
+        do {
+            let cached = try await store.libraryItems()
+            guard !cached.isEmpty, allItems.isEmpty else { return }
+            allItems = cached
+            logger.debug("hydrated \(cached.count) items from the local store")
+        } catch {
+            logger.error("hydrate failed: \(error, privacy: .public)")
+        }
+    }
+
+    /// Empties the device's copy — what signing out wants, since the next account's library has
+    /// nothing to do with this one's.
+    func clearLocalCopy() async {
+        allItems = []
+        trashItems = []
+        isHydrated = false
+        try? await store?.clear()
     }
 
     // MARK: - Registration
@@ -151,6 +205,7 @@ final class PhotoLibraryService: ObservableObject {
         // Inserted at the front rather than appended: the timeline sorts by date anyway, but a
         // caller reading `allItems` before that sort expects the newest first.
         allItems.insert(item, at: 0)
+        try? await store?.save(item)
         logger.debug("register succeeded: id=\(item.id, privacy: .public)")
         return item
     }
@@ -181,6 +236,7 @@ final class PhotoLibraryService: ObservableObject {
                 if let index = allItems.firstIndex(where: { $0.id == id }) {
                     allItems[index] = updated
                 }
+                try? await store?.save(updated)
             } catch {
                 logger.error("update failed: id=\(id, privacy: .public) \(error, privacy: .public)")
                 if let index = allItems.firstIndex(where: { $0.id == id }) {
@@ -203,6 +259,7 @@ final class PhotoLibraryService: ObservableObject {
         Task {
             do {
                 _ = try await api.send(method: "DELETE", path: "/api/v1/photos/\(id)")
+                try? await store?.save(item, trashed: true)
                 logger.debug("trash succeeded: id=\(id, privacy: .public)")
             } catch {
                 logger.error("trash failed: id=\(id, privacy: .public) \(error, privacy: .public)")
@@ -225,6 +282,7 @@ final class PhotoLibraryService: ObservableObject {
                 if let index = allItems.firstIndex(where: { $0.id == id }) {
                     allItems[index] = restored
                 }
+                try? await store?.save(restored, trashed: false)
                 logger.debug("restore succeeded: id=\(id, privacy: .public)")
             } catch {
                 logger.error("restore failed: id=\(id, privacy: .public) \(error, privacy: .public)")
@@ -241,6 +299,7 @@ final class PhotoLibraryService: ObservableObject {
         Task {
             do {
                 _ = try await api.send(method: "DELETE", path: "/api/v1/photos/trash")
+                try? await store?.replaceTrash(with: [])
                 logger.debug("emptyTrash succeeded")
             } catch {
                 logger.error("emptyTrash failed: \(error, privacy: .public)")

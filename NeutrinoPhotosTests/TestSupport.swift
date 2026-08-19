@@ -1,5 +1,6 @@
 import CryptoKit
 import Foundation
+import UIKit
 import XCTest
 @testable import NeutrinoPhotos
 
@@ -227,6 +228,31 @@ enum Fixture {
          "photoCount":\(photoCount),"createdAt":"\(rfc3339(createdAt))",
          "updatedAt":"\(rfc3339(createdAt))"}
         """
+    }
+}
+
+// MARK: - TestImages
+
+/// Real image data, because everything the rendition ladder does is ImageIO reading actual pixels.
+/// A `Data("not a jpeg")` would exercise the error path and nothing else.
+enum TestImages {
+
+    /// A JPEG with two flat regions, so a downscale still has something to encode.
+    ///
+    /// Rendered at scale 1 so `size` is pixels rather than points — otherwise the same test asserts
+    /// against a 2× image on one simulator and a 3× image on another.
+    static func jpeg(size: CGFloat = 64, quality: CGFloat = 0.9) -> Data {
+        let format = UIGraphicsImageRendererFormat()
+        format.scale = 1
+        let renderer = UIGraphicsImageRenderer(size: CGSize(width: size, height: size),
+                                               format: format)
+        let image = renderer.image { context in
+            UIColor.systemTeal.setFill()
+            context.fill(CGRect(x: 0, y: 0, width: size, height: size))
+            UIColor.black.setFill()
+            context.fill(CGRect(x: 0, y: 0, width: size / 2, height: size / 2))
+        }
+        return image.jpegData(compressionQuality: quality) ?? Data()
     }
 }
 

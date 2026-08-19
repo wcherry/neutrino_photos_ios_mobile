@@ -120,7 +120,11 @@ struct MediaItem: Identifiable, Hashable {
 /// Every field is optional because the whole object is: it is written by a background job after the
 /// upload, so a photograph imported a second ago has none of it. The viewer's info panel shows what
 /// is there and omits what is not, rather than waiting for a complete set.
-struct MediaMetadata: Hashable, Decodable {
+///
+/// `Encodable` as well as `Decodable` only so ``LocalStore`` can keep it in a column. The property
+/// names *are* the wire names — the Photos endpoints serialize camelCase — so the encoded shape is
+/// the shape it arrived in, and a row written by one version decodes in the next.
+struct MediaMetadata: Hashable, Codable {
     let width: Int?
     let height: Int?
     let format: String?
@@ -129,7 +133,7 @@ struct MediaMetadata: Hashable, Decodable {
 
 // MARK: - MediaExif
 
-struct MediaExif: Hashable, Decodable {
+struct MediaExif: Hashable, Codable {
     let make: String?
     let model: String?
     let exposureTime: String?

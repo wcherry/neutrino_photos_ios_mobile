@@ -161,18 +161,26 @@ final class PhotoImportService: ObservableObject {
     // MARK: - One item
 
     private func importOne(_ pickerItem: PhotosPickerItem) async {
+        if pickerItem.supportedContentTypes.contains(where: { $0.conforms(to: .movie) }) {
+            await importMovie(pickerItem)
+            return
+        }
+
         var name = "Photo"
         do {
             guard let data = try await pickerItem.loadTransferable(type: Data.self) else {
                 throw ImagePreparation.Failure.unreadable
             }
 
-            let prepared = try prepare(data, for: pickerItem)
+            let prepared = try ImagePreparation.prepare(data, suggestedName: nil)
             name = ImagePreparation.fileName(from: nil, extension: prepared.fileExtension,
                                              fallbackDate: prepared.captureDate ?? Date())
             currentName = name
 
-            let fingerprint = Self.fingerprint(of: prepared.data)
+            let bytes = prepared.data
+            let fingerprint = await Task.detached(priority: .userInitiated) {
+                Self.fingerprint(of: bytes)
+            }.value
             guard !fingerprints.contains(fingerprint) else {
                 skipped += 1
                 logger.debug("skipped a duplicate: \(name, privacy: .public)")
@@ -195,30 +203,79 @@ final class PhotoImportService: ObservableObject {
         }
     }
 
-    /// Photographs go through ``ImagePreparation``; videos are stored exactly as they came.
+    // MARK: - Videos
+
+    /// Imports a video without ever holding it.
     ///
-    /// There is no transcoding and no poster frame for a video yet, so it uploads without the
-    /// preview a picture gets and shows a film icon in the grid until this app can decode a frame
-    /// from one.
-    private func prepare(_ data: Data, for pickerItem: PhotosPickerItem) throws
-    -> ImagePreparation.Prepared {
-        let movieType = pickerItem.supportedContentTypes.first { $0.conforms(to: .movie) }
-        guard let movieType else {
-            return try ImagePreparation.prepare(data, suggestedName: nil)
+    /// The difference from a photograph is one word — `URL` rather than `Data` — and it is the
+    /// whole epic's memory story. `loadTransferable(type: Data.self)` on a 4K three-minute clip is
+    /// half a gigabyte of `Data` before a single byte is encrypted; asking for the file instead
+    /// leaves it on disk, and ``MediaContentService/upload(fileURL:fileName:mimeType:thumbnailBase64:onProgress:)``
+    /// encrypts and sends it a chunk at a time from there.
+    ///
+    /// A video still uploads without the cover thumbnail a picture gets — decoding a poster frame is
+    /// Epic 8 — so it shows a film symbol in the grid rather than a still.
+    private func importMovie(_ pickerItem: PhotosPickerItem) async {
+        var name = "Video"
+        do {
+            guard let movie = try await pickerItem.loadTransferable(type: PickedMovie.self) else {
+                throw ImagePreparation.Failure.unreadable
+            }
+            defer { try? FileManager.default.removeItem(at: movie.url) }
+
+            let type = pickerItem.supportedContentTypes.first { $0.conforms(to: .movie) }
+            let ext = movie.url.pathExtension.isEmpty
+                ? (type?.preferredFilenameExtension ?? "mov")
+                : movie.url.pathExtension
+            name = ImagePreparation.fileName(from: nil, extension: ext)
+            currentName = name
+
+            let url = movie.url
+            let fingerprint = try await Task.detached(priority: .userInitiated) {
+                try Self.fingerprint(ofFileAt: url)
+            }.value
+            guard !fingerprints.contains(fingerprint) else {
+                skipped += 1
+                logger.debug("skipped a duplicate video: \(name, privacy: .public)")
+                return
+            }
+
+            let fileID = try await content.upload(
+                fileURL: movie.url, fileName: name,
+                mimeType: type?.preferredMIMEType ?? "video/quicktime",
+                thumbnailBase64: nil,
+                onProgress: { [weak self] fraction in self?.currentFraction = fraction }
+            )
+            try await library.register(fileID: fileID, captureDate: nil)
+            fingerprints.insert(fingerprint)
+            logger.debug("imported \(name, privacy: .public) as \(fileID, privacy: .public)")
+        } catch is CancellationError {
+            logger.debug("import cancelled")
+        } catch {
+            logger.error("import failed for \(name, privacy: .public): \(error, privacy: .public)")
+            failures.append(Failure(name: name, message: error.localizedDescription))
         }
-        return ImagePreparation.Prepared(
-            data: data,
-            mimeType: movieType.preferredMIMEType ?? "video/quicktime",
-            fileExtension: movieType.preferredFilenameExtension ?? "mov",
-            thumbnailBase64: nil,
-            captureDate: nil
-        )
     }
 
     // MARK: - Fingerprints
 
-    private static func fingerprint(of data: Data) -> String {
+    nonisolated private static func fingerprint(of data: Data) -> String {
         SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+    }
+
+    /// The same hash, computed a block at a time — a video cannot be read into memory to be
+    /// fingerprinted any more than it can be to be encrypted.
+    ///
+    /// `nonisolated` so it can be called off the main actor, which is where hashing half a gigabyte
+    /// belongs. `importMovie` awaits it on a detached task for that reason.
+    nonisolated static func fingerprint(ofFileAt url: URL) throws -> String {
+        let handle = try FileHandle(forReadingFrom: url)
+        defer { try? handle.close() }
+        var hasher = SHA256()
+        while let block = try handle.read(upToCount: 1 << 20), !block.isEmpty {
+            hasher.update(data: block)
+        }
+        return hasher.finalize().map { String(format: "%02x", $0) }.joined()
     }
 
     private func persistFingerprints() {
@@ -234,4 +291,33 @@ final class PhotoImportService: ObservableObject {
     }
 
     var importedCount: Int { fingerprints.count }
+}
+
+// MARK: - PickedMovie
+
+/// A video from the picker, as a file rather than as bytes.
+///
+/// `PhotosPickerItem` will hand over a `Data` for anything, which is the wrong shape for a video and
+/// the right shape for nothing else this app imports. A `FileRepresentation` gets the URL instead —
+/// but the file it points at is the *picker's*, deleted the moment the transfer's closure returns,
+/// so it has to be copied somewhere this app owns before that happens. Hence the copy: it is not
+/// belt and braces, it is the only reason the URL is still valid when the upload reads it.
+///
+/// The caller deletes the copy when the upload finishes.
+struct PickedMovie: Transferable {
+
+    let url: URL
+
+    static var transferRepresentation: some TransferRepresentation {
+        FileRepresentation(importedContentType: .movie) { received in
+            let destination = FileManager.default.temporaryDirectory
+                .appendingPathComponent("import", isDirectory: true)
+            try? FileManager.default.createDirectory(at: destination, withIntermediateDirectories: true)
+            let copy = destination.appendingPathComponent(
+                UUID().uuidString + "." + received.file.pathExtension)
+            try? FileManager.default.removeItem(at: copy)
+            try FileManager.default.copyItem(at: received.file, to: copy)
+            return PickedMovie(url: copy)
+        }
+    }
 }

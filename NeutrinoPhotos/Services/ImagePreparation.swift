@@ -57,10 +57,10 @@ enum ImagePreparation {
 
     /// Longest edge of the stored preview, in pixels. The web app's `generateThumbnail` uses the
     /// same 512, so a picture uploaded here and one uploaded there are the same size in the grid.
-    static let thumbnailMaximumPixels: CGFloat = 512
+    static let thumbnailMaximumPixels: CGFloat = MediaRendition.thumbnail.maximumPixels ?? 512
 
     /// JPEG quality for that preview, again the web app's.
-    static let thumbnailQuality: CGFloat = 0.8
+    static let thumbnailQuality: CGFloat = MediaRendition.thumbnail.jpegQuality
 
     // MARK: - Preparing
 
@@ -157,25 +157,11 @@ enum ImagePreparation {
     ///
     /// Answers nil rather than throwing — a picture whose preview could not be made is still a
     /// picture worth uploading.
+    ///
+    /// The rendering itself lives in ``RenditionGenerator``, which is where the other two steps of
+    /// the ladder are made; this is the one that has to come out as base64 because it travels as a
+    /// multipart *field* rather than as a file.
     static func thumbnailBase64(from data: Data) -> String? {
-        guard let source = CGImageSourceCreateWithData(data as CFData, nil) else { return nil }
-
-        let options: [CFString: Any] = [
-            kCGImageSourceCreateThumbnailFromImageAlways: true,
-            kCGImageSourceCreateThumbnailWithTransform: true,
-            kCGImageSourceThumbnailMaxPixelSize: thumbnailMaximumPixels,
-        ]
-        guard let thumbnail = CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary)
-        else { return nil }
-
-        let jpeg = NSMutableData()
-        guard let destination = CGImageDestinationCreateWithData(
-            jpeg, UTType.jpeg.identifier as CFString, 1, nil) else { return nil }
-        CGImageDestinationAddImage(destination, thumbnail, [
-            kCGImageDestinationLossyCompressionQuality: thumbnailQuality,
-        ] as CFDictionary)
-        guard CGImageDestinationFinalize(destination) else { return nil }
-
-        return (jpeg as Data).base64EncodedString()
+        RenditionGenerator.jpeg(from: data, rendition: .thumbnail)?.base64EncodedString()
     }
 }

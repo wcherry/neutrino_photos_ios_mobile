@@ -31,21 +31,22 @@ its own Settings > Encryption page, chosen in the app or simply tapped in Files.
 | Authentication | OAuth PKCE login, token refresh, device registration, account profile, sign out | COMPLETE |
 | Encryption | Vault unlock (password, recovery code, passkey), key import (file, paste, or tapped), Keychain storage, per-file key sealing and unsealing, locked state | COMPLETE |
 | Devices | The account's signed-in devices, when each registered, revoking one | COMPLETE |
-| Timeline | Grid grouped by day / month / year, capture-date ordering, pull to refresh | COMPLETE |
+| Timeline | Grid grouped by day / month / year, capture-date ordering, pull to refresh, drawn from the local index before the network answers | COMPLETE |
 | Viewer | Full screen, pinch and double-tap zoom, swipe between items, info panel | COMPLETE |
-| Video | Playback of the decrypted original | COMPLETE |
+| Video | Playback of the decrypted original, streamed to disk rather than held | COMPLETE |
 | Import | Multi-select from the system picker, HEIC→JPEG, EXIF capture date, thumbnail, upload progress, cancel, duplicate skip | COMPLETE |
+| Media pipeline | Rendition ladder, encrypted preview beside each original, capped and evicted caches of decrypted media, SQLite library index | COMPLETE |
 | Favorites / Archive / Trash | Star, archive, delete, restore, empty | COMPLETE |
 | Albums | List, create, rename, delete, add a photo | PARTIAL — see below |
-| Settings | Account, grouping, appearance, Wi-Fi-only uploads, cache, device name, roadmap | COMPLETE |
+| Settings | Account, grouping, appearance, Wi-Fi-only uploads, storage breakdown, cache, device name, roadmap | COMPLETE |
 
 The shell is four tabs — Library, Albums, Search, Settings — and keeps that shape in every build.
 Search has no index behind it yet and says so; a tab that appeared when a flag flipped would move
 the other three under the user's thumb.
 
-`FeatureFlags` is the honest list of what is *not* here yet: automatic backup, offline browsing,
-search, places, people, memories, editing, sharing, and Universal Links. Each is a flag set to
-`false` rather than a half-built screen.
+`FeatureFlags` is the honest list of what is *not* here yet: automatic backup, offline mode, search,
+places, people, memories, editing, sharing, and Universal Links. Each is a flag set to `false`
+rather than a half-built screen.
 
 ## Architecture
 
@@ -60,9 +61,14 @@ NeutrinoPhotosApp        composition root — every service constructed once, in
 ├── KeyFileRouter        a .json key file handed to the app from outside
 ├── DeviceSessionService /api/v1/auth/sessions — the account's devices
 ├── PhotoLibraryService  /api/v1/photos — the library, favorites, archive, trash, registration
+├── PhotosDriveService   /api/v1/drive — the type=photo listing, quota, the renditions folder
 ├── AlbumService         /api/v1/albums
 ├── MediaContentService  download + decrypt an original; encrypt + upload a new one
-│   └── MediaCrypto      the primitives: one-shot and streaming, DEK sealing, metadata
+│   ├── MediaCrypto      the primitives: one-shot and streaming, DEK sealing, metadata
+│   ├── MediaRendition   the ladder — thumbnail, preview, original — and how each is made
+│   └── DiskCache        decrypted media, capped and evicted least-recently-used
+├── ThumbnailCache       the grid's bitmaps: NSCache over that same DiskCache
+├── LocalStore           SQLite — the timeline before the network answers, and the rendition index
 ├── PhotoImportService   picker → prepare → upload → register, one item at a time
 ├── NetworkMonitor       connectivity and whether the path is metered
 └── AppSettings          preferences, in UserDefaults
@@ -146,15 +152,86 @@ bounded size rather than through `UIImage(data:)`, which would hold about 48 MB 
 12-megapixel photograph. Downscaling before upload throws pixels away for good; downsampling at
 decode only declines to hold them.
 
-### Import is serial
+### Three sizes of a photograph
+
+| | Longest edge | Stored | Drawn by |
+|---|---|---|---|
+| Thumbnail | 512 px | **plaintext**, on the Drive file | the grid |
+| Preview | 2048 px | **encrypted**, as a second Drive file | the viewer |
+| Original | as the camera wrote it | **encrypted**, the Drive file itself | zoom, export, save-back |
+
+Only the thumbnail is in the clear, and only because a grid has to draw before any key is imported
+and from one listing response rather than a thousand downloads. It is small enough to be a contact
+sheet and too small to be the photograph. Everything above it *is* the photograph, and is encrypted
+like one.
+
+The preview earns its place at the other end. Opening one picture otherwise means fetching a 4 MB
+original to fill a screen that holds about 400 KB of it; the preview costs a tenth of the original
+once and saves the other nine tenths every time the item is opened, on any device. It is generated
+on the uploading device because nowhere else can — the server holds ciphertext and has no key — and
+filed in a `Photo Previews` subfolder, since both library listings are root-scoped and a rendition
+in the root would show up as a duplicate photograph in the web app.
+
+Nothing in the ladder is load-bearing. A photograph with no preview rendition opens its original and
+makes one locally; a file with no cover thumbnail draws a symbol; a preview that has been deleted in
+Drive falls through to the original with a line in the log. And a preview is only made when it would
+actually be smaller than the picture it is a preview of — a screenshot or a web graphic gets none,
+by the same rule on both the upload side and the fallback.
+
+Finding a rendition is the one awkward part: nothing on a photo record can hold its file id, so the
+*name* is the index (`<originalFileID>.preview.jpg`). The uploading device knows the mapping
+immediately; every other one learns it by listing the folder once at launch and keeping the result
+in `LocalStore`.
+
+### What is kept on this device
+
+Three things, and they are cleared by different buttons for different reasons.
+
+**Decrypted media** — originals and videos — sits in a capped `DiskCache` under `Library/Caches`,
+evicted least recently used. It is decrypted, which is a trade rather than an oversight: it carries
+`.completeUntilFirstUserAuthentication` file protection, the same accessibility class as the key that
+produced it, is excluded from iCloud backup, and is emptied from Settings. The alternative —
+re-downloading and re-decrypting a 4 GB video on every play — is not one a phone can afford. LRU is
+implemented as a modification date, stamped on read, because iOS does not reliably update access
+dates and an in-memory recency list is empty exactly when the cache is fullest.
+
+**Grid thumbnails** get the same treatment plus an `NSCache` of decoded bitmaps on top, which empties
+itself under memory pressure. What that tier saves is the decode, not the download.
+
+**The library index** is SQLite (`LocalStore`), in Application Support rather than Caches — the system
+may empty Caches at any moment, and a timeline that occasionally forgets everything is worse than one
+that never cached. It holds the photo records and the rendition index, migrates off `user_version`,
+and answers the timeline with one query against `photo(is_trashed, is_archived, timeline_date DESC)`
+— stored rather than computed, because an expression cannot lead an index and a 100,000-row sort is
+the thing being avoided. `PhotoLibraryService` paints from it before the network is asked anything,
+then replaces it with whatever the listing says.
+
+That is a cache, not offline mode. There is no cursor, no tombstone, no conflict rule, and no queue
+for changes made with no signal — those are Epic 10's, and half of them would be worse than none.
+
+### Import is serial, and a video is never held
 
 An original is in memory twice while it is in flight — plaintext and ciphertext — so importing five
 48-megapixel photographs in parallel is how a phone gets killed. One at a time also gives honest
 progress: "3 of 40", with a byte count for the item actually moving.
 
-Duplicate detection is a SHA-256 of the prepared bytes, kept on the device. It has to be local: the
-server stores ciphertext and cannot compare two uploads for sameness. It catches the common case —
-the same photographs picked twice — and Settings can forget the record.
+A video is not held at all. The picker hands over a file URL rather than `Data`, `MediaCrypto`
+encrypts it a chunk at a time into a temporary file, the multipart body copies that through a fixed
+buffer, and `URLSession` streams the result off disk — so peak memory is a couple of megabytes
+whether the clip is 30 seconds or 20 minutes. Coming back the other way, anything over 32 MB spools
+to disk and decrypts there.
+
+The one thing that has to travel with a chunked file is its framing: `[header][chunk][chunk]…` and a
+single push of the same bytes are indistinguishable, and guessing wrong fails authentication rather
+than reading short. So the chunk size is written into the file's *encrypted metadata*, and a
+streaming download reads that before it decrypts anything. It also means a chunked file is not
+readable by today's web client — which is why the chunking threshold sits at 64 MB, above every
+photograph and below every video. Pictures stay interoperable; videos stay openable.
+
+Duplicate detection is a SHA-256 of the prepared bytes, kept on the device (hashed a block at a time
+for a video, for the same reason as everything else here). It has to be local: the server stores
+ciphertext and cannot compare two uploads for sameness. It catches the common case — the same
+photographs picked twice — and Settings can forget the record.
 
 ## Known Gaps
 
@@ -176,8 +253,16 @@ instead of them.
 photo-library permission and never sees the rest of the roll. Watching for new photographs needs
 `PHPhotoLibrary`, its permission prompt, and `BGTaskScheduler` — that is `FeatureFlags.automaticBackup`.
 
-**No offline mode.** Listings and thumbnails are fetched per launch; nothing is cached but decrypted
-videos, which live in the temporary directory and are cleared from Settings.
+**No offline mode.** The device's copy of the library is a cache, not a replica. A cold launch with
+no signal draws the timeline it drew last time and opens anything still in the media cache — but a
+favourite toggled with no network is lost when the request fails, a delete made on another device is
+invisible until the next listing, and there is no cursor to ask "what changed". `FeatureFlags.offlineMode`
+stays `false` until Epic 10 adds the sync engine and the queue behind it.
+
+**Preview renditions are ours alone.** The `Photo Previews` folder is a Drive folder like any other
+and today's web client neither writes nor reads it. It ignores it — the folder is outside the
+root-scoped listing the web library uses — but somebody browsing Drive will see it. Deleting it
+costs nothing: every rendition is re-derivable from its original, and every read falls back.
 
 ## Testing
 
@@ -186,9 +271,17 @@ xcodebuild test -project NeutrinoPhotos.xcodeproj -scheme NeutrinoPhotos \
   -destination "platform=iOS Simulator,name=iPhone 17 Pro,OS=latest"
 ```
 
-149 tests. HTTP is exercised end to end against `MockURLProtocol` — real requests, real decoding, real
+219 tests. HTTP is exercised end to end against `MockURLProtocol` — real requests, real decoding, real
 status handling — rather than behind a protocol seam. The crypto is *not* mocked: `TestKeys` installs
 a genuine X25519 pair, so the seal / unseal / secretstream round trip is asserted for what it is.
+The caches and the database are real too, in a temporary directory per test — a cache that is stubbed
+out cannot be shown to serve a second read, which is the only thing a cache is for.
+
+The pipeline's own assertion is that an uploaded original comes back byte for byte: the bytes go out
+through the multipart upload, are pulled back out of the captured request body exactly as the server
+would have stored them, are served back through the download path, and are hashed at the far end. A
+test that encrypted and decrypted in place would pass with a mangled multipart body, which is the
+failure that one is for.
 
 The vault tests go one step further and assert against the *other* implementation. `WebVault` holds a
 key vault produced by the web client's own `hash-wasm` and `libsodium-wrappers` over fixed inputs, and

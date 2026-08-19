@@ -24,7 +24,15 @@ struct NeutrinoPhotosApp: App {
     @StateObject private var importer: PhotoImportService
     @StateObject private var vault: KeyVaultService
     @StateObject private var devices: DeviceSessionService
+    @StateObject private var drive: PhotosDriveService
+    @StateObject private var thumbnails: ThumbnailCache
     @StateObject private var keyFiles = KeyFileRouter()
+
+    /// The device's copy of the library. Optional because opening a database can fail — a full
+    /// disk, a device the user has locked out of its own storage — and every consumer treats it as
+    /// an accelerator rather than a source of truth, so "no database" degrades to the behaviour the
+    /// app had before there was one.
+    private let store: LocalStore?
 
     // MARK: - Init
 
@@ -32,16 +40,23 @@ struct NeutrinoPhotosApp: App {
         // Built here rather than lazily inside the services so there is exactly one client, one
         // `URLSession`, and one place a test can swap the transport.
         let api = APIClient()
-        let library = PhotoLibraryService(api: api)
-        let content = MediaContentService(api: api)
+        let store = try? LocalStore.makeDefault()
+        let drive = PhotosDriveService(api: api, store: store)
+        let thumbnails = ThumbnailCache()
+        let library = PhotoLibraryService(api: api, store: store)
+        let content = MediaContentService(api: api, store: store, drive: drive,
+                                          thumbnails: thumbnails)
         let settings = AppSettings()
         let monitor = NetworkMonitor()
         let vault = KeyVaultService(api: api)
 
+        self.store = store
         _api = StateObject(wrappedValue: api)
         _library = StateObject(wrappedValue: library)
         _albums = StateObject(wrappedValue: AlbumService(api: api))
         _content = StateObject(wrappedValue: content)
+        _drive = StateObject(wrappedValue: drive)
+        _thumbnails = StateObject(wrappedValue: thumbnails)
         _settings = StateObject(wrappedValue: settings)
         _networkMonitor = StateObject(wrappedValue: monitor)
         _vault = StateObject(wrappedValue: vault)
@@ -65,6 +80,8 @@ struct NeutrinoPhotosApp: App {
                 .environmentObject(importer)
                 .environmentObject(vault)
                 .environmentObject(devices)
+                .environmentObject(drive)
+                .environmentObject(thumbnails)
                 .environmentObject(keyFiles)
                 .preferredColorScheme(settings.theme.colorScheme)
                 .task { await configure() }
@@ -92,6 +109,10 @@ struct NeutrinoPhotosApp: App {
         // And no idea whether this device still holds the account's key. Asking is one GET, and
         // it is the only thing that notices a key left behind by a different account.
         await vault.refresh()
+        // Which photographs already have a preview rendition in the cloud. One listing, and the
+        // answer is what keeps the viewer from downloading originals it does not need. A device
+        // that never runs this simply generates previews locally instead.
+        await drive.refreshRenditionIndex()
     }
 }
 
@@ -104,6 +125,8 @@ private struct RootView: View {
     @EnvironmentObject private var authService: AuthService
     @EnvironmentObject private var vault: KeyVaultService
     @EnvironmentObject private var keyFiles: KeyFileRouter
+    @EnvironmentObject private var library: PhotoLibraryService
+    @EnvironmentObject private var content: MediaContentService
 
     @State private var showsUnlock = false
     @State private var hasOfferedUnlock = false
@@ -139,7 +162,17 @@ private struct RootView: View {
             if case .imported = outcome { vault.refreshFromKeychain() }
         }
         .onChange(of: authService.isAuthenticated) { isAuthenticated in
-            guard isAuthenticated else { return }
+            guard isAuthenticated else {
+                // Signing out has to empty the device's copy of the library, not just the screen.
+                // The next account to sign in here would otherwise hydrate the previous one's
+                // timeline from the local database and draw somebody else's photographs until the
+                // first listing came back.
+                Task {
+                    await library.clearLocalCopy()
+                    content.clearCache()
+                }
+                return
+            }
             hasOfferedUnlock = false
             Task { await vault.refresh() }
         }
