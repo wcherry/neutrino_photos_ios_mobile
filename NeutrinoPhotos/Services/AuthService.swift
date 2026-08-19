@@ -26,6 +26,21 @@ enum AuthError: LocalizedError, Equatable {
     }
 }
 
+// MARK: - UserProfile
+
+/// The signed-in account, as `GET /api/v1/auth/me` reports it.
+///
+/// The server serializes this one camelCase already, so it needs no key strategy — only
+/// `DriveDate`'s date handling, because `created_at` is a zone-less `NaiveDateTime`.
+struct UserProfile: Decodable, Equatable {
+    let id: String
+    let email: String
+    let name: String
+    let createdAt: Date
+    let role: String
+    let totpEnabled: Bool
+}
+
 // MARK: - AuthService
 
 /// Three-step OAuth PKCE flow (no browser required), shared with Neutrino Drive, Docs, and Notes:
@@ -45,6 +60,10 @@ final class AuthService: ObservableObject {
     @Published var isAuthenticated: Bool = false
     @Published var loginError: String?
     @Published var isLoggingIn: Bool = false
+
+    /// The signed-in account, once `loadProfile()` has answered. Nil while it is in flight, and on
+    /// a launch that never reached the server — the app is usable without it, so nothing waits.
+    @Published private(set) var profile: UserProfile?
 
     // MARK: - Keychain Keys
 
@@ -70,6 +89,7 @@ final class AuthService: ObservableObject {
         static var loginURL:     String { baseURL + "/api/v1/auth/login" }
         static var authorizeURL: String { baseURL + "/api/v1/oauth/authorize" }
         static var tokenURL:     String { baseURL + "/api/v1/oauth/token" }
+        static var meURL:        String { baseURL + "/api/v1/auth/me" }
         static let clientID    = "neutrino-photos-ios"
         static let redirectURI = "neutrino://oauth/callback"
     }
@@ -114,6 +134,9 @@ final class AuthService: ObservableObject {
                                                 state: state, expectedState: state)
             try await step3Exchange(code: code, verifier: verifier)
             logger.debug("login succeeded")
+            // Not part of the exchange, and deliberately after it: the session is established
+            // whether or not the profile call answers, so a failure here must not fail the login.
+            await loadProfile()
         } catch let error as AuthError {
             logger.error("login failed: \(error.localizedDescription, privacy: .public)")
             loginError = error.localizedDescription
@@ -131,11 +154,55 @@ final class AuthService: ObservableObject {
         KeychainService.delete(forKey: AuthService.tokenExpiryKey)
         isAuthenticated = false
         loginError = nil
+        profile = nil
         logger.debug("logged out")
     }
 
     func accessToken() -> String? {
         KeychainService.load(forKey: AuthService.accessTokenKey)
+    }
+
+    /// Loads the signed-in account from `GET /api/v1/auth/me` and publishes it as `profile`.
+    ///
+    /// Called after a successful sign-in and once at launch for a session restored from the
+    /// Keychain. Everything the app *does* is addressed by the token's `sub` claim (see
+    /// `AccessToken`), so this exists to show the user which account they are in rather than to
+    /// unlock anything — which is why it answers nil on failure instead of throwing.
+    ///
+    /// A 401 is the exception: `refreshTokenIfNeeded` has already run, so a token still rejected
+    /// here is revoked rather than stale, and the session is over.
+    @discardableResult
+    func loadProfile() async -> UserProfile? {
+        guard let url = URL(string: AuthConfig.meURL) else { return nil }
+        await refreshTokenIfNeeded()
+        guard let token = accessToken() else { return nil }
+
+        var request = URLRequest(url: url)
+        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+
+        do {
+            let (data, response) = try await perform(request, on: session)
+            guard let http = response as? HTTPURLResponse else { return nil }
+
+            if http.statusCode == 401 {
+                logger.error("profile rejected; signing out")
+                logout()
+                return nil
+            }
+            guard (200...299).contains(http.statusCode) else {
+                throw AuthError.serverError(statusCode: http.statusCode)
+            }
+
+            let profile = try DriveDate.makeDecoder().decode(UserProfile.self, from: data)
+            self.profile = profile
+            logger.debug("profile loaded")
+            return profile
+        } catch {
+            // Offline, 5xx, or a shape this build doesn't know. The library is browsable without
+            // knowing the account's display name.
+            logger.error("profile load failed: \(error.localizedDescription, privacy: .public)")
+            return nil
+        }
     }
 
     /// Refreshes the access token when it is within a minute of expiring. Every service calls this

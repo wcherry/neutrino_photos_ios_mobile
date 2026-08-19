@@ -29,7 +29,14 @@ struct SettingsView: View {
             aboutSection
         }
         .navigationTitle("Settings")
-        .task { cacheSize = content.cacheSizeOnDisk() }
+        .task {
+            cacheSize = content.cacheSizeOnDisk()
+            // A second chance at the account: the launch attempt is the only other one, and it
+            // happens exactly when a phone is most likely to still be off the network.
+            if authService.profile == nil {
+                await authService.loadProfile()
+            }
+        }
         .confirmationDialog("Sign out of Neutrino Photos?",
                             isPresented: $showsSignOutConfirmation, titleVisibility: .visible) {
             Button("Sign Out", role: .destructive) { authService.logout() }
@@ -130,6 +137,14 @@ struct SettingsView: View {
 
     private var accountSection: some View {
         Section {
+            if let profile = authService.profile {
+                LabeledContent("Signed in as", value: profile.name)
+                LabeledContent("Email", value: profile.email)
+            } else {
+                // `GET /api/v1/auth/me` hasn't answered — a launch that never reached the server,
+                // usually. The session is still valid; only the display name is missing.
+                LabeledContent("Signed in as", value: "—")
+            }
             HStack {
                 Text("Device name")
                 Spacer()

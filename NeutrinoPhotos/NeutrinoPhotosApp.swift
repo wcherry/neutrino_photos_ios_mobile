@@ -71,6 +71,9 @@ struct NeutrinoPhotosApp: App {
 
         if authService.isAuthenticated {
             await authService.refreshTokenIfNeeded()
+            // A session restored from the Keychain has tokens but no profile — login is where the
+            // other one comes from, and a relaunch doesn't go through it.
+            await authService.loadProfile()
         }
     }
 }

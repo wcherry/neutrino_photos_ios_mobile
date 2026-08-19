@@ -144,12 +144,90 @@ final class AuthServiceTests: XCTestCase {
                       "signing back in should not mean importing the key again")
     }
 
+    // MARK: - Profile
+
+    func testLoadProfileReadsTheAccount() async {
+        TestTokens.install()
+        MockURLProtocol.respond(json: Self.profileJSON)
+
+        let sut = AuthService(configuration: configuration)
+        let profile = await sut.loadProfile()
+
+        XCTAssertEqual(profile?.id, "user-1")
+        XCTAssertEqual(profile?.email, "someone@example.com")
+        XCTAssertEqual(profile?.name, "Someone")
+        XCTAssertEqual(sut.profile, profile)
+
+        let request = MockURLProtocol.request { $0.url?.path.hasSuffix("/auth/me") == true }
+        XCTAssertEqual(request?.value(forHTTPHeaderField: "Authorization"),
+                       "Bearer \(TestTokens.defaultAccessToken)")
+    }
+
+    func testLoadProfileIsFetchedOnLogin() async {
+        stubFullLoginFlow(includeProfile: true)
+
+        let sut = AuthService(configuration: configuration)
+        await sut.login(email: "someone@example.com", password: "hunter2")
+
+        XCTAssertTrue(sut.isAuthenticated)
+        XCTAssertEqual(sut.profile?.email, "someone@example.com")
+    }
+
+    func testLoadProfileFailureKeepsTheSession() async {
+        TestTokens.install()
+        MockURLProtocol.respond(json: #"{"error":"server"}"#, statusCode: 500)
+
+        let sut = AuthService(configuration: configuration)
+        let profile = await sut.loadProfile()
+
+        XCTAssertNil(profile)
+        XCTAssertTrue(sut.isAuthenticated,
+                      "an unreachable server is not a reason to sign somebody out")
+    }
+
+    func testRejectedProfileSignsOut() async {
+        TestTokens.install()
+        // The token was fresh enough to skip a refresh and the server still refused it — that is a
+        // revoked session, not a stale one.
+        MockURLProtocol.respond(json: #"{"error":"unauthorized"}"#, statusCode: 401)
+
+        let sut = AuthService(configuration: configuration)
+        let profile = await sut.loadProfile()
+
+        XCTAssertNil(profile)
+        XCTAssertFalse(sut.isAuthenticated)
+        XCTAssertNil(KeychainService.load(forKey: AuthService.accessTokenKey))
+    }
+
+    func testLogoutClearsTheProfile() async {
+        TestTokens.install()
+        MockURLProtocol.respond(json: Self.profileJSON)
+
+        let sut = AuthService(configuration: configuration)
+        await sut.loadProfile()
+        sut.logout()
+
+        XCTAssertNil(sut.profile)
+    }
+
     // MARK: - Helpers
 
+    /// `GET /api/v1/auth/me`, as the server serializes `UserProfileResponse` — camelCase keys and
+    /// a zone-less `NaiveDateTime`.
+    private static let profileJSON = """
+    {"id":"user-1","email":"someone@example.com","name":"Someone",
+     "createdAt":"2026-01-04T09:15:00","role":"user","totpEnabled":false}
+    """
+
     /// Answers all three legs: session login, the 302 carrying the code, and the token exchange.
-    private func stubFullLoginFlow() {
+    ///
+    /// - Parameter includeProfile: also answers the `/auth/me` call login makes afterwards.
+    private func stubFullLoginFlow(includeProfile: Bool = false) {
         MockURLProtocol.handler = { request in
             let path = request.url?.path ?? ""
+            if includeProfile, path.hasSuffix("/auth/me") {
+                return (Self.response(for: request, status: 200), Data(Self.profileJSON.utf8))
+            }
             if path.hasSuffix("/auth/login") {
                 return (Self.response(for: request, status: 200),
                         Data(#"{"accessToken":"session-token"}"#.utf8))

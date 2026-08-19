@@ -75,9 +75,16 @@ Covers mvp.md §18 Phase 0.
 **Deliverables**
 
 - [ ] `agent_docs/architecture.md` — the decisions below, written down with rationale
-- [ ] Photo data model: `PhotoItem`, `PhotoAsset` (original/derived), `Album`, `PhotoMetadata`
-- [ ] Drive mapping: how a photo is represented as a Drive object (MIME type, folder layout,
+- [x] Photo data model: `PhotoItem`, `PhotoAsset` (original/derived), `Album`, `PhotoMetadata`
+      — shipped as `MediaItem` / `MediaMetadata` + `MediaExif` / `Album`, decoded against the live
+      API and covered by `ModelTests`. There is deliberately no `PhotoAsset` type: the original *is*
+      the Drive file (`MediaItem.fileID`) and the only derived artefact is the cover thumbnail
+      carried on the record.
+- [x] Drive mapping: how a photo is represented as a Drive object (MIME type, folder layout,
       the `type=photo` listing filter, where derived renditions live)
+      — decided and implemented; see the doc comments on `MediaContentService.upload` (root folder,
+      no `folder_id`, two-step upload-then-register) and the README's "The library is Photos, the
+      bytes are Drive".
 - [ ] Local database choice and schema (SQLite via GRDB, or Core Data — decide and justify;
       the deciding factor is 100k-row timeline query performance, not familiarity)
 - [ ] Sync protocol: cursor/delta shape, conflict rule, tombstones
@@ -85,8 +92,23 @@ Covers mvp.md §18 Phase 0.
 - [ ] Background task architecture: `BGProcessingTask` vs `URLSession` background config,
       and which one owns the upload queue
 - [ ] Error/retry policy: which errors are retryable, backoff curve, poison-item handling
-- [ ] Key management: master key → per-file DEK derivation, matching the web app's
+- [x] Key management: master key → per-file DEK derivation, matching the web app's
       `crypto_box_seal` + XChaCha20-Poly1305 secretstream (see `project.yml` notes)
+      — implemented in `MediaContentService` (`sealDEK` / `unsealDEK` / `encrypt` / `decryptToBytes`)
+      and `KeyImportService`, and asserted against real crypto rather than a mock. Note the DEK is
+      *generated* per file and sealed to the account's Curve25519 identity key, not derived from a
+      master key — that is what the web app does and the two must agree.
+
+**Status (verified 2026-08-18):** three of nine deliverables are done — and they are the three the
+app was *forced* to decide in order to ship the timeline, so they exist as working code rather than
+as prose. The other six are the ones an implementation can defer, and all six were: there is no
+local database anywhere in the tree (no GRDB, Core Data, or SQLite dependency), no sync cursor,
+no retry or backoff logic, and no background task registration. `FeatureFlags.offlineMode` and
+`FeatureFlags.automaticBackup` are `false` for exactly this reason.
+
+`architecture.md` has not been written. Some of what belongs in it now lives in `README.md` and in
+the doc comments on `MediaContentService` — that covers the decided items but not the deferred ones,
+and it is not a substitute for the document the exit criteria name.
 
 **Exit criteria:** A reviewer can read `architecture.md` and correctly predict what Epic 3 and
 Epic 10 will look like without asking a question.
@@ -111,15 +133,33 @@ and ports `AuthService.swift` from the Notes app.
 
 **Deliverables**
 
-- [ ] `NeutrinoPhotosApp.swift` + tab shell: Library · Albums · Search · Settings
-- [ ] `AuthService` — sign in, sign out, token refresh, `GET /api/v1/auth/me`
-- [ ] Sign-in screen; signed-out state for every tab
-- [ ] Token persisted in Keychain; survives app termination
-- [ ] Device registered via `DeviceIdentity`
-- [ ] Placeholder views for each tab, so the shell is navigable end to end
-- [ ] `FeatureFlags.swift` created
+- [x] `NeutrinoPhotosApp.swift` + tab shell: Library · Albums · Search · Settings
+      — the composition root builds every service once and injects it; `ContentView` holds the four
+      tabs, each with its own `NavigationStack`. The shell's shape is fixed rather than flag-dependent,
+      so tabs don't move under the user's thumb between builds.
+- [x] `AuthService` — sign in, sign out, token refresh, `GET /api/v1/auth/me`
+      — the three-step OAuth PKCE flow (session login → authorize with the redirect suppressed →
+      token exchange), refresh-if-expiring on every authorized request, and `loadProfile()` for
+      `/auth/me`. A 401 from `/me` signs out (revoked, not stale); a 5xx or an offline phone does not.
+- [x] Sign-in screen; signed-out state for every tab
+      — `RootView` gates the whole shell: signed out is `LoginView`, not four tabs each explaining
+      themselves. Cold install therefore opens on sign-in, which is what verification step 1 asks for.
+- [x] Token persisted in Keychain; survives app termination
+      — `KeychainService`, `kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly`, under `nphoto.*` keys
+      so Drive/Docs/Notes on the same device don't collide. `AuthService.init` reads it back.
+- [x] Device registered via `DeviceIdentity`
+      — there is no registration endpoint: a device names itself in `X-Device-Name` on login, which
+      is what `GET /api/v1/auth/sessions` later lists. Asserted in `AuthServiceTests`.
+- [x] Placeholder views for each tab, so the shell is navigable end to end
+      — `TabPlaceholderView`, used by `SearchView` and by the Albums tab when `FeatureFlags.albums`
+      is off. Library and Settings are real.
+- [x] `FeatureFlags.swift` created
 
 **Flag:** none — this is the floor.
+
+**Status (2026-08-18):** all seven deliverables are implemented and the unit suite passes. Verification
+step 1 has been run (`--reset` → the app opens on sign-in, screenshot confirmed). Steps 2–7 need a real
+Neutrino account and, for step 7, the paired device — they have not been run, so **M0 is not closed**.
 
 **Manual verification**
 

@@ -27,7 +27,7 @@ Settings > Encryption page.
 
 | Area | Features | Status |
 |------|----------|--------|
-| Authentication | OAuth PKCE login, token refresh, device registration, sign out | COMPLETE |
+| Authentication | OAuth PKCE login, token refresh, device registration, account profile, sign out | COMPLETE |
 | Encryption | Key import (file or paste), Keychain storage, per-file key sealing and unsealing | COMPLETE |
 | Timeline | Grid grouped by day / month / year, capture-date ordering, pull to refresh | COMPLETE |
 | Viewer | Full screen, pinch and double-tap zoom, swipe between items, info panel | COMPLETE |
@@ -35,7 +35,11 @@ Settings > Encryption page.
 | Import | Multi-select from the system picker, HEIC→JPEG, EXIF capture date, thumbnail, upload progress, cancel, duplicate skip | COMPLETE |
 | Favorites / Archive / Trash | Star, archive, delete, restore, empty | COMPLETE |
 | Albums | List, create, rename, delete, add a photo | PARTIAL — see below |
-| Settings | Grouping, appearance, Wi-Fi-only uploads, cache, device name, roadmap | COMPLETE |
+| Settings | Account, grouping, appearance, Wi-Fi-only uploads, cache, device name, roadmap | COMPLETE |
+
+The shell is four tabs — Library, Albums, Search, Settings — and keeps that shape in every build.
+Search has no index behind it yet and says so; a tab that appeared when a flag flipped would move
+the other three under the user's thumb.
 
 `FeatureFlags` is the honest list of what is *not* here yet: automatic backup, offline browsing,
 search, places, people, memories, editing, sharing, and Universal Links. Each is a flag set to
@@ -46,7 +50,7 @@ search, places, people, memories, editing, sharing, and Universal Links. Each is
 ```
 NeutrinoPhotosApp        composition root — every service constructed once, injected explicitly
 ├── APIClient            all authorized HTTP: token refresh, status checks, JSON, uploads
-├── AuthService          OAuth PKCE (login → authorize → token), refresh, logout
+├── AuthService          OAuth PKCE (login → authorize → token), refresh, /auth/me, logout
 ├── PhotoLibraryService  /api/v1/photos — the library, favorites, archive, trash, registration
 ├── AlbumService         /api/v1/albums
 ├── MediaContentService  download + decrypt an original; encrypt + upload a new one
