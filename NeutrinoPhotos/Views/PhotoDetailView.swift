@@ -1,3 +1,4 @@
+import AVFoundation
 import AVKit
 import SwiftUI
 
@@ -159,18 +160,50 @@ struct PhotoDetailView: View {
 // MARK: - MediaPage
 
 /// One item at full size: a zoomable photograph, or a video player.
+///
+/// ## The ladder, climbed as it is needed
+///
+/// Three steps, each replacing the last in place so the picture sharpens rather than flashes:
+///
+/// | Step | Where it comes from | When |
+/// |---|---|---|
+/// | Thumbnail | the cover the grid already drew — no network at all | immediately |
+/// | Preview | the 2048 px encrypted rendition, or the original downscaled | on open |
+/// | Original | the full file, decrypted | only once zoomed past ``originalZoomThreshold`` |
+///
+/// Starting from the thumbnail is what makes a swipe through twenty photographs show a picture on
+/// every page instead of a spinner: the bytes for it are already on the device. Stopping at the
+/// preview until a zoom asks for more is what keeps opening a photograph from downloading twelve
+/// megapixels to fill a screen that can show two.
 private struct MediaPage: View {
+
+    // MARK: - Stage
+
+    /// How far up the ladder this page has climbed. Ordered so a step can never be replaced by a
+    /// coarser one that finished later — a thumbnail arriving after its preview would otherwise
+    /// blur a picture that was already sharp.
+    private enum Stage: Int, Comparable {
+        case none
+        case thumbnail
+        case preview
+        case original
+
+        static func < (lhs: Stage, rhs: Stage) -> Bool { lhs.rawValue < rhs.rawValue }
+    }
 
     let item: MediaItem
     @Binding var showsChrome: Bool
 
     @EnvironmentObject private var content: MediaContentService
+    @EnvironmentObject private var thumbnails: ThumbnailCache
     @EnvironmentObject private var vault: KeyVaultService
 
     @State private var image: UIImage?
+    @State private var stage: Stage = .none
     @State private var player: AVPlayer?
     @State private var error: String?
     @State private var isLoading = false
+    @State private var isLoadingOriginal = false
     /// Set when the failure was specifically "no key on this device", which is the one failure with
     /// something the user can do about it right here.
     @State private var isLocked = false
@@ -182,6 +215,17 @@ private struct MediaPage: View {
     @GestureState private var pinch: CGFloat = 1
     @State private var offset: CGSize = .zero
     @GestureState private var drag: CGSize = .zero
+    /// The page's own size, kept so pan can be clamped and so a rotation can re-clamp what was
+    /// legal in portrait and is not in landscape.
+    @State private var viewport: CGSize = .zero
+
+    /// How far in a zoom has to go before the original is worth fetching. Just past a double-tap's
+    /// worth of magnification: below it the preview genuinely has the pixels, and above it the
+    /// screen is showing less of the picture than the preview can resolve.
+    private let originalZoomThreshold: CGFloat = 1.5
+    private let maximumZoom: CGFloat = 10
+
+    // MARK: - Body
 
     var body: some View {
         ZStack {
@@ -189,17 +233,27 @@ private struct MediaPage: View {
                 VideoPlayer(player: player)
                     .onAppear { player.play() }
                     .onDisappear { player.pause() }
+            } else if let error, stage < .preview {
+                // Checked *before* the picture, because by this point there is usually a thumbnail
+                // on screen and drawing it would hide the failure — and with it the Unlock button,
+                // which is the whole of what the user can do about the commonest failure there is.
+                failure(error)
             } else if let image {
                 photo(image)
-            } else if let error {
-                failure(error)
             } else {
                 ProgressView()
                     .tint(.white)
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+        // A photograph still on its thumbnail, or fetching its original for a zoom, says so rather
+        // than leaving the user to wonder whether the blur is the picture.
+        .overlay(alignment: .topTrailing) { sharpeningIndicator }
         .task(id: item.id) { await load() }
+        .onChange(of: scale) { newScale in
+            guard newScale >= originalZoomThreshold else { return }
+            Task { await loadOriginal() }
+        }
         .sheet(isPresented: $showsUnlock) {
             VaultUnlockView(onUnlocked: {
                 // Clear the failure so `load()` runs again for this page when the sheet closes.
@@ -217,33 +271,52 @@ private struct MediaPage: View {
     // MARK: - Photo
 
     private func photo(_ image: UIImage) -> some View {
-        Image(uiImage: image)
-            .resizable()
-            .scaledToFit()
-            .scaleEffect(scale * pinch)
-            .offset(x: offset.width + drag.width, y: offset.height + drag.height)
-            .gesture(
-                MagnificationGesture()
-                    .updating($pinch) { value, state, _ in state = value }
-                    .onEnded { value in
-                        scale = min(max(1, scale * value), 6)
-                        if scale == 1 { offset = .zero }
-                    }
-            )
-            // Panning is only attached while zoomed in: at 1× the horizontal drag belongs to the
-            // pager, and claiming it would stop the viewer swiping between photographs.
-            .gesture(scale > 1 ? panGesture : nil)
-            .onTapGesture(count: 2) { toggleZoom() }
-            .onTapGesture { showsChrome.toggle() }
-            .animation(.easeInOut(duration: 0.2), value: scale)
+        GeometryReader { geometry in
+            Image(uiImage: image)
+                .resizable()
+                .scaledToFit()
+                .frame(width: geometry.size.width, height: geometry.size.height)
+                .scaleEffect(scale * pinch)
+                .offset(x: offset.width + drag.width, y: offset.height + drag.height)
+                .gesture(
+                    MagnificationGesture()
+                        .updating($pinch) { value, state, _ in state = value }
+                        .onEnded { value in
+                            scale = min(max(1, scale * value), maximumZoom)
+                            if scale == 1 {
+                                offset = .zero
+                            } else {
+                                offset = clamped(offset, image: image)
+                            }
+                        }
+                )
+                // Panning is only live while zoomed in: at 1× the horizontal drag belongs to the
+                // pager, and claiming it would stop the viewer swiping between photographs.
+                // `.subviews` leaves this view's own gesture out of the running without disabling
+                // the ancestor's.
+                .gesture(panGesture(image: image), including: scale > 1 ? .all : .subviews)
+                .onTapGesture(count: 2) { toggleZoom() }
+                .onTapGesture { showsChrome.toggle() }
+                .animation(.easeInOut(duration: 0.2), value: scale)
+                .onAppear { viewport = geometry.size }
+                // A rotation keeps the zoom — what step 6 asks for — but an offset that was inside
+                // the picture in portrait can be outside it in landscape, so it is re-clamped.
+                .onChange(of: geometry.size) { size in
+                    viewport = size
+                    offset = clamped(offset, image: image)
+                }
+        }
     }
 
-    private var panGesture: some Gesture {
+    private func panGesture(image: UIImage) -> some Gesture {
         DragGesture()
             .updating($drag) { value, state, _ in state = value.translation }
             .onEnded { value in
-                offset.width += value.translation.width
-                offset.height += value.translation.height
+                offset = clamped(
+                    CGSize(width: offset.width + value.translation.width,
+                           height: offset.height + value.translation.height),
+                    image: image
+                )
             }
     }
 
@@ -253,6 +326,40 @@ private struct MediaPage: View {
             offset = .zero
         } else {
             scale = 2.5
+        }
+    }
+
+    /// Keeps a pan inside the picture, so a photograph cannot be flung off the screen and left
+    /// there with nothing to drag back.
+    ///
+    /// The bound is half the overhang on each axis: how far the zoomed picture extends past the
+    /// viewport, which is zero on an axis the picture does not fill — a wide photograph zoomed a
+    /// little is still letterboxed vertically, and should not move up and down.
+    private func clamped(_ offset: CGSize, image: UIImage) -> CGSize {
+        guard viewport.width > 0, viewport.height > 0, image.size.width > 0, image.size.height > 0
+        else { return offset }
+
+        let fitted = AVMakeRect(aspectRatio: image.size,
+                                insideRect: CGRect(origin: .zero, size: viewport)).size
+        let limitX = max(0, (fitted.width * scale - viewport.width) / 2)
+        let limitY = max(0, (fitted.height * scale - viewport.height) / 2)
+
+        return CGSize(width: min(max(offset.width, -limitX), limitX),
+                      height: min(max(offset.height, -limitY), limitY))
+    }
+
+    // MARK: - Sharpening
+
+    @ViewBuilder
+    private var sharpeningIndicator: some View {
+        if isLoadingOriginal || (stage == .thumbnail && error == nil) {
+            ProgressView()
+                .tint(.white)
+                .padding(8)
+                .background(.black.opacity(0.35), in: Circle())
+                .padding(.top, 60)
+                .padding(.trailing, 16)
+                .transition(.opacity)
         }
     }
 
@@ -278,9 +385,17 @@ private struct MediaPage: View {
     // MARK: - Loading
 
     private func load() async {
-        guard !isLoading, image == nil, player == nil else { return }
+        guard !isLoading, stage < .preview, player == nil else { return }
         isLoading = true
         defer { isLoading = false }
+
+        // Step one, before anything is asked of the network. The grid drew this cell a moment ago,
+        // so its cover is already decoded — a page that opens on it never shows an empty frame, and
+        // a video gets a poster to sit behind its player instead of a black rectangle.
+        if let cover = await thumbnails.image(for: item), stage < .thumbnail {
+            image = cover
+            stage = .thumbnail
+        }
 
         do {
             if item.kind == .video {
@@ -291,15 +406,44 @@ private struct MediaPage: View {
                 // A video has to be decrypted to a file before it can be played: `AVPlayer` reads
                 // from a URL, and the Drive URL serves ciphertext no player could demux.
                 player = AVPlayer(url: try await content.localURL(for: item))
+                stage = .preview
             } else {
-                image = try await content.image(for: item)
+                image = try await content.image(for: item, rendition: .preview)
+                stage = .preview
             }
         } catch let error as MediaContentError {
             // "No key on this device" is the one failure here with a next step, so it gets one.
             if case .noEncryptionKey = error { isLocked = true }
             self.error = error.localizedDescription
+            return
         } catch {
             self.error = error.localizedDescription
+            return
         }
+
+        // A zoom that happened while the preview was still downloading would otherwise be lost:
+        // `onChange(of: scale)` did fire, but it fired while the page was still on its thumbnail
+        // and `loadOriginal` refused. This is the catch-up.
+        if scale >= originalZoomThreshold {
+            await loadOriginal()
+        }
+    }
+
+    /// The last step of the ladder, taken only when a zoom has gone far enough to want it.
+    ///
+    /// A failure here is swallowed on purpose: the preview is still on screen and still correct, so
+    /// there is nothing to tell the user and nothing for them to do. That is different from
+    /// ``load()`` failing, which leaves an empty page and has to say why.
+    private func loadOriginal() async {
+        guard item.kind == .photo, stage == .preview, !isLoadingOriginal else { return }
+        isLoadingOriginal = true
+        defer { isLoadingOriginal = false }
+
+        guard let full = try? await content.image(for: item, rendition: .original) else { return }
+        // Re-checked after the await: a swipe or a pinch back to 1× may have moved on while the
+        // original was downloading, and `stage` is what says whether this is still wanted.
+        guard stage == .preview else { return }
+        image = full
+        stage = .original
     }
 }

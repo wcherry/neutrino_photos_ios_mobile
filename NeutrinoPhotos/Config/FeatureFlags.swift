@@ -17,10 +17,16 @@ enum FeatureFlags {
     /// sealing a per-file key on upload, and unsealing it to open an original.
     static let encryption: Bool = true
 
-    /// The photo timeline: the library grid, grouped by day / month / year.
+    /// The photo timeline: the library grid grouped by day / month / year, pinched between those
+    /// densities, travelled with the date scrubber, and selected from.
+    ///
+    /// Like ``mediaPipeline``, nothing branches on this one. The timeline is the Library tab rather
+    /// than a feature inside it, and a `false` here would leave the tab with nothing to draw — so
+    /// the flag records that Epic 4 is in this build rather than switching it off.
     static let timeline: Bool = true
 
-    /// The full-screen viewer: zoom, swipe between items, info panel.
+    /// The full-screen viewer: progressive load up the rendition ladder, zoom to the original,
+    /// pan, swipe between items, info panel.
     static let viewer: Bool = true
 
     /// Video playback in the viewer, from the decrypted original.

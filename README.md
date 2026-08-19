@@ -31,8 +31,8 @@ its own Settings > Encryption page, chosen in the app or simply tapped in Files.
 | Authentication | OAuth PKCE login, token refresh, device registration, account profile, sign out | COMPLETE |
 | Encryption | Vault unlock (password, recovery code, passkey), key import (file, paste, or tapped), Keychain storage, per-file key sealing and unsealing, locked state | COMPLETE |
 | Devices | The account's signed-in devices, when each registered, revoking one | COMPLETE |
-| Timeline | Grid grouped by day / month / year, capture-date ordering, pull to refresh, drawn from the local index before the network answers | COMPLETE |
-| Viewer | Full screen, pinch and double-tap zoom, swipe between items, info panel | COMPLETE |
+| Timeline | Grid grouped by day / month / year, pinch between those densities, date scrubber, multi-select, capture-date ordering, pull to refresh, drawn from the local index before the network answers | COMPLETE |
+| Viewer | Full screen, progressive load (thumbnail → preview → original on zoom), pinch and double-tap zoom to 10×, clamped pan, swipe between items, info panel | COMPLETE |
 | Video | Playback of the decrypted original, streamed to disk rather than held | COMPLETE |
 | Import | Multi-select from the system picker, HEIC→JPEG, EXIF capture date, thumbnail, upload progress, cancel, duplicate skip | COMPLETE |
 | Media pipeline | Rendition ladder, encrypted preview beside each original, capped and evicted caches of decrypted media, SQLite library index | COMPLETE |
@@ -71,8 +71,23 @@ NeutrinoPhotosApp        composition root — every service constructed once, in
 ├── LocalStore           SQLite — the timeline before the network answers, and the rendition index
 ├── PhotoImportService   picker → prepare → upload → register, one item at a time
 ├── NetworkMonitor       connectivity and whether the path is metered
-└── AppSettings          preferences, in UserDefaults
+├── AppSettings          preferences, in UserDefaults
+└── TimelineCache        the grouped timeline, rebuilt only when the library or the density changes
 ```
+
+### The timeline's job is to not do work
+
+The Library tab draws from `TimelineCache`, not from the library service directly, and the reason is
+the scrubber and the pinch: both read scroll geometry, so `LibraryView`'s body runs on scroll
+*frames* rather than when something changes. Grouping is a filter, a sort, a bucketing, a sort inside
+each bucket, and a sort of the buckets — over the whole library — and doing that sixty times a second
+is the stutter, not the fix for it.
+
+So `PhotoLibraryService` carries a `revision` counter that bumps whenever `allItems` changes, and the
+cache keys its output on `(revision, grouping, showsArchived)`. A scroll frame costs an integer
+comparison. The same idea governs scroll position: it lives on `TimelinePosition`, which
+`LibraryView` holds but deliberately does **not** observe, so a scroll re-renders the scrubber's
+thumb rather than a thousand cells.
 
 ### The library is Photos, the bytes are Drive
 

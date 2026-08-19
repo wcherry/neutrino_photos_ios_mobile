@@ -4,12 +4,19 @@ import SwiftUI
 // MARK: - LibraryView
 
 /// The timeline: every photograph and video in the library, grouped by day, month, or year.
+///
+/// This view owns the chrome — the toolbar, the banners, the empty state, and multi-select — and
+/// hands the scrolling grid to ``TimelineGridView``. The split is not tidiness: scroll geometry
+/// re-renders whatever view reads it, and keeping that inside the grid means a flick through the
+/// library does not also re-render the import progress bar and four toolbar items.
 struct LibraryView: View {
 
     @EnvironmentObject private var library: PhotoLibraryService
     @EnvironmentObject private var settings: AppSettings
     @EnvironmentObject private var importer: PhotoImportService
     @EnvironmentObject private var vault: KeyVaultService
+    /// Held only to hand on to the viewer — see the `fullScreenCover` below.
+    @EnvironmentObject private var thumbnails: ThumbnailCache
 
     /// What the picker handed back. Cleared as soon as the import starts so picking the same
     /// photographs twice in a row still fires — an unchanged selection is not a changed binding.
@@ -18,21 +25,49 @@ struct LibraryView: View {
     @State private var hasLoaded = false
     @State private var showsUnlock = false
 
+    /// The grouped timeline, rebuilt only when the library or the density actually changes.
+    /// Deliberately not observed — see ``TimelineCache``.
+    @State private var cache = TimelineCache()
+
+    /// Where the grid is scrolled to. Held here so it survives a regroup, observed only by the
+    /// scrubber — see ``TimelinePosition``.
+    @State private var position = TimelinePosition()
+
+    @State private var selection = TimelineSelection()
+    @State private var showsBulkDeleteConfirmation = false
+
+    /// The grid's width, which is what decides how many columns fit. Measured rather than assumed
+    /// so an iPad and a Split View pane get a grid built for them instead of a stretched phone.
+    @State private var gridWidth: CGFloat = 0
+
     // MARK: - Body
 
     var body: some View {
-        Group {
-            if items.isEmpty && !library.isLoading {
+        // Reading the cache is the first thing body does, and refreshing it is a no-op on every
+        // pass where nothing changed. See ``TimelineCache`` for why this is safe from `body`.
+        cache.refresh(
+            TimelineCache.Inputs(revision: library.revision,
+                                 grouping: settings.timelineGrouping,
+                                 showsArchived: settings.showArchived)
+        ) {
+            library.timeline(showingArchived: settings.showArchived)
+        }
+
+        return Group {
+            if cache.items.isEmpty && !library.isLoading {
                 emptyState
             } else {
-                timeline
+                grid
             }
         }
-        .navigationTitle("Library")
+        .navigationTitle(navigationTitle)
         .navigationBarTitleDisplayMode(.inline)
         .toolbar { toolbar }
         .safeAreaInset(edge: .top, spacing: 0) { banners }
-        .refreshable { await library.load() }
+        .safeAreaInset(edge: .bottom, spacing: 0) { selectionBar }
+        // Pulling to refresh while picking items out of the grid is a gesture conflict with no
+        // right answer, so selection mode simply does not offer it.
+        .refreshable { if !selection.isActive { await library.load() } }
         .task {
             // Once per appearance rather than on every navigation: `refreshable` and the import
             // completion handler cover the cases where the library has actually changed.
@@ -45,75 +80,73 @@ struct LibraryView: View {
             importer.startImport(selection)
             pickerSelection = []
         }
+        // An item deleted here or on another device must not stay in the selection, or a bulk
+        // action would address something the library no longer has.
+        .onChange(of: library.allItems.count) { _ in
+            guard selection.isActive else { return }
+            // Against the library rather than against `cache.items`: the cache is refreshed by the
+            // next body pass, which has not run yet, so its copy is the one *without* this change.
+            selection.prune(against: library.timeline(showingArchived: settings.showArchived))
+        }
         .fullScreenCover(item: $viewerStart) { start in
-            PhotoDetailView(items: items, initialID: start.id)
+            // The viewer now reads the thumbnail cache too — it opens on the cover the grid already
+            // drew — so it is handed on explicitly rather than left to whether a full-screen cover
+            // inherits the presenting view's environment.
+            PhotoDetailView(items: cache.items, initialID: start.id)
+                .environmentObject(thumbnails)
         }
         .sheet(isPresented: $showsUnlock) {
             VaultUnlockView()
                 .environmentObject(vault)
         }
+        .confirmationDialog("Delete \(selection.count) item(s)?",
+                            isPresented: $showsBulkDeleteConfirmation, titleVisibility: .visible) {
+            Button("Delete", role: .destructive) { deleteSelection() }
+        } message: {
+            Text("They move to Recently Deleted and can be restored for 30 days.")
+        }
     }
 
     // MARK: - Timeline
 
-    private var items: [MediaItem] {
-        library.timeline(showingArchived: settings.showArchived)
+    private var columns: Int {
+        settings.timelineGrouping.columnCount(forWidth: gridWidth)
     }
 
-    private var sections: [TimelineSection] {
-        TimelineSection.sections(from: items, grouping: settings.timelineGrouping)
-    }
-
-    private var timeline: some View {
-        ScrollView {
-            LazyVStack(alignment: .leading, spacing: 16, pinnedViews: [.sectionHeaders]) {
-                ForEach(sections) { section in
-                    Section {
-                        grid(for: section)
-                    } header: {
-                        sectionHeader(section)
-                    }
-                }
+    private var grid: some View {
+        TimelineGridView(
+            sections: cache.sections,
+            grouping: settings.timelineGrouping,
+            columns: columns,
+            position: position,
+            selection: $selection,
+            onOpen: { viewerStart = $0 },
+            contextMenu: { item in AnyView(contextMenu(for: item)) },
+            onZoom: zoom
+        )
+        .background(
+            GeometryReader { geometry in
+                Color.clear
+                    .onAppear { gridWidth = geometry.size.width }
+                    .onChange(of: geometry.size.width) { gridWidth = $0 }
             }
-            .padding(.bottom, 24)
-        }
+        )
     }
 
-    private func grid(for section: TimelineSection) -> some View {
-        // Two points of spacing rather than none: a grid of edge-to-edge photographs reads as one
-        // texture, and a hairline is enough to tell where each picture ends.
-        LazyVGrid(columns: columns, spacing: 2) {
-            ForEach(section.items) { item in
-                Button {
-                    viewerStart = item
-                } label: {
-                    PhotoThumbnailView(item: item)
-                }
-                .buttonStyle(.plain)
-                .contextMenu { contextMenu(for: item) }
-            }
+    /// Steps the timeline's density, keeping the date on screen.
+    ///
+    /// The anchor is captured by ``TimelinePosition`` as the grid scrolls, and applied by the grid
+    /// once the new sections arrive; all this has to do is change the setting. At the ends of the
+    /// ladder — pinching in on Days, out on Years — there is nowhere to go, and doing nothing is
+    /// the honest response.
+    private func zoom(_ direction: TimelineZoomDirection) {
+        let next: TimelineGrouping?
+        switch direction {
+        case .in:  next = settings.timelineGrouping.zoomedIn
+        case .out: next = settings.timelineGrouping.zoomedOut
         }
-        .padding(.horizontal, 2)
-    }
-
-    private var columns: [GridItem] {
-        Array(repeating: GridItem(.flexible(), spacing: 2),
-              count: settings.timelineGrouping.columnCount)
-    }
-
-    private func sectionHeader(_ section: TimelineSection) -> some View {
-        HStack {
-            Text(section.title)
-                .font(.headline)
-            Spacer()
-            Text("\(section.items.count)")
-                .font(.subheadline)
-                .foregroundStyle(.secondary)
-        }
-        .padding(.horizontal)
-        .padding(.vertical, 8)
-        // Opaque: a pinned header over scrolling photographs is unreadable without it.
-        .background(.bar)
+        guard let next else { return }
+        settings.timelineGrouping = next
     }
 
     // MARK: - Context menu
@@ -136,6 +169,11 @@ struct LibraryView: View {
                       systemImage: item.isArchived ? "tray.and.arrow.up" : "archivebox")
             }
         }
+        Button {
+            selection.begin(with: item.id)
+        } label: {
+            Label("Select", systemImage: "checkmark.circle")
+        }
         if FeatureFlags.trash {
             Button(role: .destructive) {
                 library.trash(id: item.id)
@@ -147,25 +185,51 @@ struct LibraryView: View {
 
     // MARK: - Toolbar
 
+    private var navigationTitle: String {
+        guard selection.isActive else { return "Library" }
+        return selection.isEmpty ? "Select Items" : "\(selection.count) Selected"
+    }
+
     @ToolbarContentBuilder
     private var toolbar: some ToolbarContent {
         ToolbarItem(placement: .navigationBarLeading) {
-            Menu {
-                Picker("Group by", selection: $settings.timelineGrouping) {
-                    ForEach(TimelineGrouping.allCases) { grouping in
-                        Text(grouping.displayName).tag(grouping)
+            if selection.isActive {
+                Button(selection.coversAll(of: cache.items) ? "Deselect All" : "Select All") {
+                    if selection.coversAll(of: cache.items) {
+                        selection.deselectAll()
+                    } else {
+                        selection.selectAll(in: cache.items)
                     }
                 }
-                if FeatureFlags.archive {
-                    Toggle("Show Archived", isOn: $settings.showArchived)
+            } else {
+                Menu {
+                    Picker("Group by", selection: $settings.timelineGrouping) {
+                        ForEach(TimelineGrouping.allCases) { grouping in
+                            Text(grouping.displayName).tag(grouping)
+                        }
+                    }
+                    if FeatureFlags.archive {
+                        Toggle("Show Archived", isOn: $settings.showArchived)
+                    }
+                    if !cache.items.isEmpty {
+                        Divider()
+                        Button {
+                            selection.begin()
+                        } label: {
+                            Label("Select", systemImage: "checkmark.circle")
+                        }
+                    }
+                } label: {
+                    Label("View", systemImage: "square.grid.2x2")
                 }
-            } label: {
-                Label("View", systemImage: "square.grid.2x2")
             }
         }
 
         ToolbarItem(placement: .navigationBarTrailing) {
-            if FeatureFlags.importFromPhotos {
+            if selection.isActive {
+                Button("Done") { selection.end() }
+                    .fontWeight(.semibold)
+            } else if FeatureFlags.importFromPhotos {
                 PhotosPicker(selection: $pickerSelection,
                              matching: .any(of: [.images, .videos]),
                              photoLibrary: .shared()) {
@@ -174,6 +238,90 @@ struct LibraryView: View {
                 .disabled(importer.isImporting)
             }
         }
+    }
+
+    // MARK: - Selection bar
+
+    /// The actions that apply to a selection.
+    ///
+    /// Favourite, archive, and delete only — the three the library service can already do to many
+    /// items, and each is the same call the context menu makes, run in a loop. Adding a selection
+    /// to an album is Epic 9's, and is absent rather than stubbed.
+    @ViewBuilder
+    private var selectionBar: some View {
+        if selection.isActive {
+            HStack(spacing: 0) {
+                if FeatureFlags.favorites {
+                    action("Favorite", systemImage: allSelectedAreStarred ? "heart.fill" : "heart",
+                           perform: toggleStarOnSelection)
+                }
+                if FeatureFlags.archive {
+                    action("Archive",
+                           systemImage: allSelectedAreArchived ? "tray.and.arrow.up" : "archivebox",
+                           perform: toggleArchiveOnSelection)
+                }
+                if FeatureFlags.trash {
+                    action("Delete", systemImage: "trash", role: .destructive) {
+                        showsBulkDeleteConfirmation = true
+                    }
+                }
+            }
+            .disabled(selection.isEmpty)
+            .padding(.vertical, 6)
+            .background(.bar)
+        }
+    }
+
+    private func action(_ title: String, systemImage: String,
+                        role: ButtonRole? = nil, perform: @escaping () -> Void) -> some View {
+        Button(role: role, action: perform) {
+            VStack(spacing: 3) {
+                Image(systemName: systemImage)
+                    .font(.title3)
+                Text(title)
+                    .font(.caption2)
+            }
+            .frame(maxWidth: .infinity)
+        }
+    }
+
+    // MARK: - Bulk actions
+
+    private var selectedItems: [MediaItem] { selection.resolve(in: cache.items) }
+
+    /// Toggling a mixed selection favourites all of it rather than inverting each item — inverting
+    /// leaves the user with the same mixture they started from, which is never what they meant.
+    private var allSelectedAreStarred: Bool {
+        let items = selectedItems
+        return !items.isEmpty && items.allSatisfy(\.isStarred)
+    }
+
+    private var allSelectedAreArchived: Bool {
+        let items = selectedItems
+        return !items.isEmpty && items.allSatisfy(\.isArchived)
+    }
+
+    private func toggleStarOnSelection() {
+        let starred = !allSelectedAreStarred
+        for item in selectedItems where item.isStarred != starred {
+            library.setStarred(id: item.id, isStarred: starred)
+        }
+    }
+
+    private func toggleArchiveOnSelection() {
+        let archived = !allSelectedAreArchived
+        for item in selectedItems where item.isArchived != archived {
+            library.setArchived(id: item.id, isArchived: archived)
+        }
+    }
+
+    private func deleteSelection() {
+        for item in selectedItems {
+            library.trash(id: item.id)
+        }
+        // Nothing is left selected once the items are out of the timeline, so staying in the mode
+        // would just be an empty toolbar.
+        selection.end()
     }
 
     // MARK: - Banners

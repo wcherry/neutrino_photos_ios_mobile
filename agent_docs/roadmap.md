@@ -389,15 +389,70 @@ Covers mvp.md §2 Timeline (MVP subset), §19 items 7, 8.
 
 **Deliverables**
 
-- [ ] Chronological grid, newest first, grouped by day with sticky date headers
-- [ ] Month and year grouping levels; pinch-to-zoom between densities
-- [ ] Fast scroll with a date scrubber
-- [ ] Full-screen viewer: pinch/double-tap zoom, pan, swipe between items
-- [ ] Progressive load — thumbnail, then preview, then original on zoom
-- [ ] Multi-select mode
-- [ ] Empty state that points at Import
+- [x] Chronological grid, newest first, grouped by day with sticky date headers
+      — `TimelineGridView`, a `LazyVStack` of pinned `Section` headers over a `LazyVGrid`. Ordering
+      goes through `MediaItem.timelineDate` — capture date, falling back to upload date — so a
+      photograph cannot sit under one date in the grid and another in its heading.
+- [x] Month and year grouping levels; pinch-to-zoom between densities
+      — the three levels already existed as a menu; the pinch is new, and so is the part that makes
+      it usable. A `MagnificationGesture` attached *simultaneously* with the scroll (a pinch is two
+      fingers, a scroll one) steps `TimelineGrouping.zoomedIn` / `zoomedOut`, latched so one gesture
+      moves one step. The step fires mid-gesture rather than on release, because a density change
+      that waits for the fingers to lift reads as not having taken.
+      **Anchoring** is the half that matters: `TimelinePosition` notes the date at the top of the
+      screen as the grid scrolls, and `TimelineSection.index(containing:in:)` finds where that date
+      landed among the *new* sections. Without it every pinch returns to the top of the library,
+      which is exactly what verification step 2 is looking for.
+- [x] Fast scroll with a date scrubber
+      — `TimelineScrubber` (the arithmetic) and `TimelineScrubberView` (the control). The thumb
+      follows an ordinary scroll as well as leading one, so it doubles as a position indicator, and
+      fades out when the timeline settles. Sections are weighted by the rows they actually draw
+      rather than split evenly: an even split gives a 400-picture weekend and the Tuesday either
+      side of it a third of the track each, so the thumb crawls through thirty screens and then
+      leaps a year in a millimetre.
+- [x] Full-screen viewer: pinch/double-tap zoom, pan, swipe between items
+      — mostly present already; what is new is that **pan is now clamped** to the zoomed picture, so
+      a photograph can no longer be flung off screen and left there with nothing to drag back, and
+      the clamp is re-applied on a size change, which is what makes step 6's rotate-mid-zoom hold.
+      Maximum zoom raised from 6× to 10× to match step 5.
+- [x] Progressive load — thumbnail, then preview, then original on zoom
+      — `MediaPage` climbs the ladder in three steps, each replacing the last in place so the
+      picture sharpens rather than flashes: the cover thumbnail the grid already decoded (no network
+      at all), then the 2048 px preview, then the original — but only once a zoom passes 1.5×.
+      Starting from the thumbnail is what makes step 4's swipe through twenty items show a picture
+      on every page instead of a spinner.
+- [x] Multi-select mode
+      — `TimelineSelection`, a pure type holding ids rather than items so it survives the library
+      refreshing underneath it. Entered from the View menu or a cell's context menu, with Select All
+      / Deselect All, a live count in the title, and a bottom bar carrying favorite, archive, and
+      delete. Deselect All deliberately stays *in* the mode; only Done leaves it.
+      Bulk **add to album** is absent rather than stubbed — that is Epic 9's.
+- [x] Empty state that points at Import
 
-**Flag:** `timeline`
+**Flag:** `timeline` — true, and, like `mediaPipeline`, nothing branches on it. The timeline *is*
+the Library tab rather than a feature inside it, so a `false` would leave the tab with nothing to
+draw rather than hiding something.
+
+**Status (2026-08-19):** all seven deliverables are implemented; **264 unit tests pass** (up from
+219). One structural change went in alongside them and is worth knowing about:
+
+- **`TimelineCache` and `PhotoLibraryService.revision`.** The scrubber and the pinch are both driven
+  by scroll geometry, which means `LibraryView`'s body now runs on scroll *frames* rather than a
+  handful of times a minute. It was previously regrouping the whole library — filter, sort, bucket,
+  sort each bucket, sort the buckets — on every one of those passes. `TimelineCache` memoizes that
+  on a revision counter, so a scroll frame costs an integer comparison. `TimelineCacheTests` asserts
+  that sixty passes with unchanged inputs do the work once. Scroll-position state is likewise held
+  in an unobserved `TimelinePosition` so that a scroll re-renders the scrubber's thumb rather than
+  the library.
+- **Covered by the suite:** the density ladder and its round trip; column counts across phone, iPad,
+  and a 1/3 Split View pane; anchoring a date across a regroup; the scrubber's weighting, its
+  binary search at every section boundary, its behaviour off both ends of the track, and its refusal
+  to draw over a short library; the selection model including the Deselect-All-is-not-Done
+  distinction and what happens when a selected item leaves the library mid-selection.
+- **Not covered, and not coverable here:** every one of the nine manual verification steps below.
+  They need the test library on a physical device, and steps 1 and 9 need Instruments. The unit
+  suite says the arithmetic is right; it says nothing about frame rate, and 55fps is the actual
+  exit criterion. **M2 is therefore not closed by this epic** — Epic 5 and these steps remain.
 
 **Manual verification**
 

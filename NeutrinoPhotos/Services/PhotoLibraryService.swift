@@ -21,7 +21,21 @@ final class PhotoLibraryService: ObservableObject {
 
     /// Every live item, archived ones included. Filtering for the timeline happens in
     /// ``timeline(showingArchived:)`` so toggling the setting does not need a refetch.
-    @Published private(set) var allItems: [MediaItem] = []
+    @Published private(set) var allItems: [MediaItem] = [] {
+        didSet { revision &+= 1 }
+    }
+
+    /// Bumped every time ``allItems`` changes, in any way.
+    ///
+    /// This exists so a view can tell "the library is the one I last looked at" without comparing
+    /// the array, which is the expensive question: `[MediaItem] == [MediaItem]` over a full library
+    /// walks every element and, worse, every element's base64 cover thumbnail. ``TimelineCache``
+    /// keys its grouping on this integer instead, which is what keeps a body pass during a scroll
+    /// or a pinch from re-bucketing and re-sorting two thousand photographs.
+    ///
+    /// Not `@Published`: it changes in lockstep with `allItems`, which already publishes, and a
+    /// second announcement of the same change would just be a second render.
+    private(set) var revision: Int = 0
 
     /// `GET /api/v1/photos/trash` — Recently Deleted.
     @Published private(set) var trashItems: [MediaItem] = []

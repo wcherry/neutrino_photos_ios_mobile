@@ -1,3 +1,4 @@
+import CoreGraphics
 import Foundation
 
 // MARK: - TimelineGrouping
@@ -27,14 +28,67 @@ enum TimelineGrouping: String, CaseIterable, Identifiable, Codable {
         }
     }
 
-    /// How many columns the grid uses at this density. Zooming out shows more, smaller pictures,
-    /// which is what makes Years navigable at all on a phone.
+    /// How many columns the grid uses at this density on a phone. Zooming out shows more, smaller
+    /// pictures, which is what makes Years navigable at all on a phone.
+    ///
+    /// This is the *floor* rather than the answer — see ``columnCount(forWidth:)``, which is what
+    /// the grid actually asks. A window twice as wide should hold twice as many pictures, not the
+    /// same three blown up to the size of postcards.
     var columnCount: Int {
         switch self {
         case .day:   return 3
         case .month: return 4
         case .year:  return 5
         }
+    }
+
+    // MARK: - Density
+
+    /// The next density *in* — fewer, larger pictures. Nil at Days, the innermost step.
+    ///
+    /// "In" and "out" are named for the pinch that drives them, not for the calendar: pinching
+    /// apart (zooming in) enlarges the pictures, which means grouping them more finely.
+    var zoomedIn: TimelineGrouping? {
+        switch self {
+        case .day:   return nil
+        case .month: return .day
+        case .year:  return .month
+        }
+    }
+
+    /// The next density *out* — more, smaller pictures. Nil at Years.
+    var zoomedOut: TimelineGrouping? {
+        switch self {
+        case .day:   return .month
+        case .month: return .year
+        case .year:  return nil
+        }
+    }
+
+    // MARK: - Layout
+
+    /// Roughly how wide a cell wants to be at this density, in points.
+    ///
+    /// Chosen so that a 393-point phone — the iPhone 17 Pro the run script defaults to — lands
+    /// exactly on ``columnCount``. Everything wider than that is then a matter of division, which
+    /// is what keeps an iPad and a Split View pane from being a phone layout stretched.
+    var preferredCellWidth: CGFloat {
+        switch self {
+        case .day:   return 128
+        case .month: return 96
+        case .year:  return 76
+        }
+    }
+
+    /// How many columns to draw in a grid `width` points across.
+    ///
+    /// Clamped below by ``columnCount`` so a narrow Split View pane never falls to one enormous
+    /// picture per row, and above by four times it so a very wide window does not shrink cells to
+    /// the point where the grid stops being browsable.
+    func columnCount(forWidth width: CGFloat) -> Int {
+        guard width.isFinite, width > 0 else { return columnCount }
+        let fitted = Int((width / preferredCellWidth).rounded())
+        return min(max(fitted, columnCount), columnCount * 4)
     }
 }
 
@@ -90,6 +144,23 @@ struct TimelineSection: Identifiable, Hashable {
                 )
             }
             .sorted { $0.start > $1.start }
+    }
+
+    // MARK: - Lookup
+
+    /// Where `date` falls in a newest-first list of sections.
+    ///
+    /// This is what anchors a pinch: the timeline notes the date at the top of the screen, regroups
+    /// into a different density, and asks this which of the *new* sections that date landed in so
+    /// it can scroll back to it. Without it, every zoom would jump to the top of the library — the
+    /// failure verification step 2 is looking for.
+    ///
+    /// A date newer than everything answers with the first section and one older than everything
+    /// with the last, because the caller wants somewhere to scroll to rather than an exact hit.
+    static func index(containing date: Date, in sections: [TimelineSection]) -> Int? {
+        guard !sections.isEmpty else { return nil }
+        // Sections descend, so the first one that starts at or before `date` is the one holding it.
+        return sections.firstIndex { $0.start <= date } ?? sections.count - 1
     }
 
     // MARK: - Titles

@@ -146,6 +146,44 @@ final class PhotoLibraryServiceTests: XCTestCase {
         XCTAssertFalse(sut.containsFile(id: "file-b"))
     }
 
+    // MARK: - Revision
+
+    func testEveryChangeToTheLibraryBumpsTheRevision() async {
+        // What ``TimelineCache`` keys its grouping on. A change that failed to bump it would leave
+        // the timeline showing a library that is no longer there — a deleted photograph still in
+        // the grid — and no amount of scrolling would correct it.
+        let start = sut.revision
+
+        MockURLProtocol.respond(data: Fixture.listingJSON([Fixture.photoJSON(id: "a")]))
+        await sut.load()
+        let afterLoad = sut.revision
+        XCTAssertGreaterThan(afterLoad, start)
+
+        MockURLProtocol.respond(json: Fixture.photoJSON(id: "a", isStarred: true))
+        sut.setStarred(id: "a", isStarred: true)
+        XCTAssertGreaterThan(sut.revision, afterLoad, "an optimistic edit is a change too")
+        let afterStar = sut.revision
+
+        await settle()
+
+        MockURLProtocol.respond(json: "", statusCode: 204)
+        sut.trash(id: "a")
+        XCTAssertGreaterThan(sut.revision, afterStar)
+    }
+
+    func testTheRevisionDoesNotMoveWhenTheLibraryDoesNot() async {
+        MockURLProtocol.respond(data: Fixture.listingJSON([Fixture.photoJSON(id: "a")]))
+        await sut.load()
+        let quiet = sut.revision
+
+        // Reading is not changing — if it were, the memoization would never hit.
+        _ = sut.timeline(showingArchived: false)
+        _ = sut.item(id: "a")
+        _ = sut.favorites
+
+        XCTAssertEqual(sut.revision, quiet)
+    }
+
     // MARK: - Mutations
 
     func testStarringIsOptimisticAndRollsBackOnFailure() async {
