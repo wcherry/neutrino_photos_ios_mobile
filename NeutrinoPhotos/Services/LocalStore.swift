@@ -92,6 +92,35 @@ actor LocalStore {
             value TEXT NOT NULL
         );
         """,
+
+        // 2 — what has been imported, and what is still queued to be (Epic 6).
+        //
+        // Two tables with two different lifetimes. `imported_asset` is the *ledger*: it outlives
+        // every run and is what makes a second full import report zero new items. `import_queue` is
+        // one run's work list, replaced when a run starts and read back after a relaunch — it is
+        // the whole of "the import survives termination".
+        """
+        CREATE TABLE imported_asset (
+            key              TEXT PRIMARY KEY NOT NULL,
+            local_identifier TEXT,
+            fingerprint      TEXT,
+            photo_id         TEXT,
+            imported_at      REAL NOT NULL
+        );
+        CREATE INDEX imported_asset_fingerprint ON imported_asset(fingerprint);
+
+        CREATE TABLE import_queue (
+            local_identifier TEXT PRIMARY KEY NOT NULL,
+            sort_index       INTEGER NOT NULL,
+            state            TEXT NOT NULL,
+            attempts         INTEGER NOT NULL DEFAULT 0,
+            last_error       TEXT,
+            is_video         INTEGER NOT NULL DEFAULT 0,
+            estimated_bytes  INTEGER NOT NULL DEFAULT 0,
+            album_titles     TEXT
+        );
+        CREATE INDEX import_queue_state ON import_queue(state, sort_index);
+        """,
     ]
 
     /// What ``migrations`` adds up to. Asserted in tests so an appended migration that forgets to
@@ -108,6 +137,11 @@ actor LocalStore {
         static let renditionsSyncedAt = "renditions.syncedAt"
         /// The Drive folder holding the encrypted paired videos of imported Live Photos.
         static let livePhotosFolderID = "livePhotos.folderID"
+        /// When the device's photo library was last scanned for a full-library import, so the next
+        /// run can say what "since last time" means.
+        static let lastLibraryScanAt = "import.lastScanAt"
+        /// When a full-library run last drained to nothing.
+        static let lastLibraryImportAt = "import.lastCompletedAt"
     }
 
     // MARK: - Private
@@ -339,6 +373,240 @@ actor LocalStore {
         }
     }
 
+    // MARK: - The import ledger
+
+    /// Every `PHAsset.localIdentifier` this device has already imported.
+    ///
+    /// Read whole, once, because the question it answers is asked once per asset during a scan —
+    /// fifty thousand times over an acceptance library — and a point query per asset would turn a
+    /// scan into fifty thousand round trips through this actor. The set costs a few megabytes at
+    /// that size, which is the trade this makes knowingly.
+    func importedAssetIdentifiers() throws -> Set<String> {
+        var identifiers: Set<String> = []
+        try query("SELECT local_identifier FROM imported_asset WHERE local_identifier IS NOT NULL;",
+                  row: { statement in
+                      if let value = Self.text(statement, 0) { identifiers.insert(value) }
+                  })
+        return identifiers
+    }
+
+    /// Whether these exact bytes have been uploaded before.
+    ///
+    /// A point query rather than a set, because unlike the identifier this is asked once per item
+    /// being *imported* rather than once per item being scanned — by which time the item's bytes
+    /// have already been read off disk and hashed, and one indexed lookup is free beside that.
+    func hasImportedFingerprint(_ fingerprint: String) -> Bool {
+        var found = false
+        try? query("SELECT 1 FROM imported_asset WHERE fingerprint = ? LIMIT 1;",
+                   bind: { self.bind($0, 1, fingerprint) },
+                   row: { _ in found = true })
+        return found
+    }
+
+    /// The photo record an already-imported asset became, if it is known.
+    func importedPhotoID(forAsset localIdentifier: String) -> String? {
+        var result: String?
+        try? query("SELECT photo_id FROM imported_asset WHERE local_identifier = ? LIMIT 1;",
+                   bind: { self.bind($0, 1, localIdentifier) },
+                   row: { result = Self.text($0, 0) })
+        return result
+    }
+
+    func importedCount() -> Int {
+        Int(Self.scalar(database, "SELECT COUNT(*) FROM imported_asset;") ?? 0)
+    }
+
+    /// Records one import.
+    ///
+    /// - Parameter localIdentifier: nil for an item picked in the photo picker on a device with no
+    ///   library access — there is no asset to name, and the fingerprint is the only key there is.
+    ///   The row is keyed by the identifier when there is one so that re-importing the same asset
+    ///   updates its row rather than adding a second, and by its hash when there is not.
+    func recordImport(localIdentifier: String?, fingerprint: String?, photoID: String?,
+                      at date: Date = Date()) throws {
+        guard let key = localIdentifier ?? fingerprint.map({ "sha256:" + $0 }) else { return }
+        try run("""
+                INSERT OR REPLACE INTO imported_asset
+                    (key, local_identifier, fingerprint, photo_id, imported_at)
+                VALUES (?, ?, ?, ?, ?);
+                """) { statement in
+            bind(statement, 1, key)
+            bind(statement, 2, localIdentifier)
+            bind(statement, 3, fingerprint)
+            bind(statement, 4, photoID)
+            sqlite3_bind_double(statement, 5, date.timeIntervalSince1970)
+        }
+    }
+
+    /// Bulk-records fingerprints with no asset behind them — the one-time migration of the
+    /// `UserDefaults` list this app kept before there was a table for it.
+    func recordImportedFingerprints(_ fingerprints: [String]) throws {
+        try transaction {
+            for fingerprint in fingerprints {
+                try recordImport(localIdentifier: nil, fingerprint: fingerprint, photoID: nil)
+            }
+        }
+    }
+
+    func clearImportLedger() throws {
+        try execute("DELETE FROM imported_asset;")
+    }
+
+    // MARK: - The import queue
+
+    /// Replaces the queue with a new run's work list.
+    ///
+    /// Wholesale, including over a queue a previous run left failures in — which is correct rather
+    /// than lossy: a scan queues everything the ledger has never seen, and an item that failed last
+    /// time was, by definition, never recorded as imported. It comes straight back, with its
+    /// attempt count reset, which is what somebody scanning again is asking for.
+    func replaceImportQueue(with items: [ImportQueueItem]) throws {
+        try transaction {
+            try execute("DELETE FROM import_queue;")
+            for item in items { try insert(item) }
+        }
+    }
+
+    private func insert(_ item: ImportQueueItem) throws {
+        try run("""
+                INSERT OR REPLACE INTO import_queue
+                    (local_identifier, sort_index, state, attempts, last_error, is_video,
+                     estimated_bytes, album_titles)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?);
+                """) { statement in
+            bindQueueRow(statement, item)
+        }
+    }
+
+    private func bindQueueRow(_ statement: OpaquePointer, _ item: ImportQueueItem) {
+        bind(statement, 1, item.localIdentifier)
+        sqlite3_bind_int(statement, 2, Int32(item.sortIndex))
+        bind(statement, 3, item.state.rawValue)
+        sqlite3_bind_int(statement, 4, Int32(item.attempts))
+        bind(statement, 5, item.lastError)
+        sqlite3_bind_int(statement, 6, item.isVideo ? 1 : 0)
+        sqlite3_bind_int64(statement, 7, item.estimatedBytes)
+        bind(statement, 8, Self.encodeTitles(item.albumTitles))
+    }
+
+    /// The next items to attempt, oldest position first.
+    func nextPendingImportItems(limit: Int = 1) throws -> [ImportQueueItem] {
+        var items: [ImportQueueItem] = []
+        try query("""
+                  SELECT local_identifier, sort_index, state, attempts, last_error, is_video,
+                         estimated_bytes, album_titles
+                  FROM import_queue WHERE state = 'pending' ORDER BY sort_index ASC LIMIT ?;
+                  """,
+                  bind: { sqlite3_bind_int($0, 1, Int32(limit)) },
+                  row: { items.append(Self.queueItem(from: $0)) })
+        return items
+    }
+
+    /// Everything that has failed, for the list the user can retry from. Bounded, because a run
+    /// that failed on every one of fifty thousand items should not also try to draw them all.
+    func failedImportItems(limit: Int = 200) throws -> [ImportQueueItem] {
+        var items: [ImportQueueItem] = []
+        try query("""
+                  SELECT local_identifier, sort_index, state, attempts, last_error, is_video,
+                         estimated_bytes, album_titles
+                  FROM import_queue WHERE state = 'failed' ORDER BY sort_index ASC LIMIT ?;
+                  """,
+                  bind: { sqlite3_bind_int($0, 1, Int32(limit)) },
+                  row: { items.append(Self.queueItem(from: $0)) })
+        return items
+    }
+
+    /// The whole queue as counts and byte totals, in one pass over the index.
+    func importQueueCounts() -> ImportQueueCounts {
+        var counts = ImportQueueCounts()
+        try? query("""
+                   SELECT state, COUNT(*), COALESCE(SUM(estimated_bytes), 0)
+                   FROM import_queue GROUP BY state;
+                   """, row: { statement in
+            let state = ImportQueueItem.State(rawValue: Self.text(statement, 0) ?? "")
+            let count = Int(sqlite3_column_int64(statement, 1))
+            let bytes = sqlite3_column_int64(statement, 2)
+            switch state {
+            case .pending:
+                counts.pending = count
+                counts.pendingBytes = bytes
+            case .failed:
+                counts.failed = count
+                counts.failedBytes = bytes
+            case .done:
+                counts.done = count
+                counts.finishedBytes += bytes
+            case .skipped:
+                counts.skipped = count
+                counts.finishedBytes += bytes
+            case nil:
+                break
+            }
+        })
+        return counts
+    }
+
+    /// Records how one attempt went.
+    func updateImportItem(_ localIdentifier: String, state: ImportQueueItem.State,
+                          attempts: Int, error: String? = nil) throws {
+        try run("""
+                UPDATE import_queue SET state = ?, attempts = ?, last_error = ?
+                WHERE local_identifier = ?;
+                """) { statement in
+            bind(statement, 1, state.rawValue)
+            sqlite3_bind_int(statement, 2, Int32(attempts))
+            bind(statement, 3, error)
+            bind(statement, 4, localIdentifier)
+        }
+    }
+
+    /// Puts failed rows back in the queue.
+    ///
+    /// - Parameter maximumAttempts: nil re-queues everything, which is what the Retry button does.
+    ///   A number re-queues only what has not been tried that many times — the automatic pass at
+    ///   the end of a run, which must not spin forever on an item that will never upload.
+    /// - Returns: how many rows were re-queued.
+    @discardableResult
+    func requeueFailedImportItems(maximumAttempts: Int? = nil) throws -> Int {
+        let sql = maximumAttempts == nil
+            ? "UPDATE import_queue SET state = 'pending' WHERE state = 'failed';"
+            : "UPDATE import_queue SET state = 'pending' WHERE state = 'failed' AND attempts < ?;"
+        try run(sql) { statement in
+            if let maximumAttempts { sqlite3_bind_int(statement, 1, Int32(maximumAttempts)) }
+        }
+        return Int(sqlite3_changes(database))
+    }
+
+    func clearImportQueue() throws {
+        try execute("DELETE FROM import_queue;")
+    }
+
+    private static func queueItem(from statement: OpaquePointer) -> ImportQueueItem {
+        ImportQueueItem(
+            localIdentifier: text(statement, 0) ?? "",
+            sortIndex: Int(sqlite3_column_int64(statement, 1)),
+            state: ImportQueueItem.State(rawValue: text(statement, 2) ?? "") ?? .pending,
+            attempts: Int(sqlite3_column_int64(statement, 3)),
+            lastError: text(statement, 4),
+            isVideo: sqlite3_column_int(statement, 5) != 0,
+            estimatedBytes: sqlite3_column_int64(statement, 6),
+            albumTitles: decodeTitles(text(statement, 7))
+        )
+    }
+
+    /// Album titles travel as a JSON array rather than as a delimited string: a title is whatever
+    /// the user typed in Apple Photos, and every separator character worth choosing is one somebody
+    /// has an album named after.
+    private static func encodeTitles(_ titles: [String]) -> String? {
+        guard !titles.isEmpty, let data = try? JSONEncoder().encode(titles) else { return nil }
+        return String(decoding: data, as: UTF8.self)
+    }
+
+    private static func decodeTitles(_ json: String?) -> [String] {
+        guard let json, let data = json.data(using: .utf8) else { return [] }
+        return (try? JSONDecoder().decode([String].self, from: data)) ?? []
+    }
+
     // MARK: - Meta
 
     func string(forKey key: String) -> String? {
@@ -364,9 +632,17 @@ actor LocalStore {
 
     /// Empties every table, keeping the schema. What "sign out" and "clear cache" both want: the
     /// database itself is not the problem, the account's photographs in it are.
+    ///
+    /// The import ledger and queue go with them, and that is deliberate rather than incidental: the
+    /// next account to sign in on this device has none of these photographs, so a ledger saying
+    /// they are all uploaded would leave that account with an empty library and an import that
+    /// reports nothing to do.
     func clear() throws {
         try transaction {
-            try execute("DELETE FROM photo; DELETE FROM rendition; DELETE FROM meta;")
+            try execute("""
+                        DELETE FROM photo; DELETE FROM rendition; DELETE FROM meta;
+                        DELETE FROM imported_asset; DELETE FROM import_queue;
+                        """)
         }
         // Returns the freed pages to the filesystem — without it the file keeps a full library's
         // worth of space after a sign-out, which is exactly what the user asked to get back.

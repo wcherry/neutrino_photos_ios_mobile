@@ -125,19 +125,20 @@ final class PhotoImportServiceTests: XCTestCase {
 
     // MARK: - Import history
 
-    func testImportHistoryPersistsAndCanBeForgotten() {
+    func testImportHistoryPersistsAndCanBeForgotten() async {
         XCTAssertEqual(sut.importedCount, 0)
 
-        defaults.set(["aaa", "bbb"], forKey: "import.fingerprints")
+        // The pre-Epic-6 shape, still read on a device that has not yet hydrated a database.
+        defaults.set(["aaa", "bbb"], forKey: ImportLedger.legacyFingerprintsKey)
         let api = APIClient(session: MockURLProtocol.makeSession())
         let reloaded = PhotoImportService(content: MediaContentService(api: api),
                                           library: PhotoLibraryService(api: api),
                                           settings: settings, monitor: monitor, defaults: defaults)
         XCTAssertEqual(reloaded.importedCount, 2)
 
-        reloaded.forgetImportHistory()
+        await reloaded.ledger.forget()
         XCTAssertEqual(reloaded.importedCount, 0)
-        XCTAssertNil(defaults.stringArray(forKey: "import.fingerprints"))
+        XCTAssertNil(defaults.stringArray(forKey: ImportLedger.legacyFingerprintsKey))
     }
 }
 
@@ -231,7 +232,7 @@ final class ImagePreparationTests: XCTestCase {
         let bytes = Data((0..<(3 << 20)).map { UInt8($0 % 251) })
         try bytes.write(to: url)
 
-        let streamed = try PhotoImportService.fingerprint(ofFileAt: url)
+        let streamed = try MediaImportPipeline.fingerprint(ofFileAt: url)
 
         let expected = SHA256.hash(data: bytes).map { String(format: "%02x", $0) }.joined()
         XCTAssertEqual(streamed, expected)

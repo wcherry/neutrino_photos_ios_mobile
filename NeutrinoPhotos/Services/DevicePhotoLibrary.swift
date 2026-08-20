@@ -272,7 +272,141 @@ final class DevicePhotoLibrary: ObservableObject {
         )
     }
 
+    // MARK: - Scanning the whole library
+
+    /// Everything a full-library import needs to know before it starts: what is there, and how it
+    /// is organised.
+    struct Snapshot: Sendable {
+        /// Every photograph and video the app can see, newest first.
+        let assets: [ScannedAsset]
+        /// Asset identifier → the titles of the user albums it belongs to.
+        let albumTitles: [String: [String]]
+    }
+
+    /// Walks the library.
+    ///
+    /// Runs off the main actor, which is the point: `enumerateObjects` over fifty thousand assets is
+    /// tens of thousands of trips across the Photos XPC boundary, and doing that on the thread
+    /// drawing the progress bar means the progress bar does not draw. `PHFetchResult` and `PHAsset`
+    /// are immutable snapshots, so reading them from another thread is safe; publishing what they
+    /// say is not, hence the hop in `onProgress`.
+    ///
+    /// - Parameter onProgress: the live count, called as the walk proceeds rather than at the end,
+    ///   because the end is a minute away on a large library.
+    func scan(onProgress: @escaping @MainActor (Int) -> Void) async throws -> Snapshot {
+        guard access.isUsable else { throw DeviceLibraryError.notAuthorized }
+        let snapshot = await Task.detached(priority: .userInitiated) {
+            Self.walkLibrary { count in
+                Task { @MainActor in onProgress(count) }
+            }
+        }.value
+        itemCount = snapshot.assets.count
+        logger.debug("scan found \(snapshot.assets.count) item(s) in \(snapshot.albumTitles.count) album membership(s)")
+        return snapshot
+    }
+
+    /// The walk itself. `nonisolated` and `static` so it can run anywhere but the main actor.
+    nonisolated private static func walkLibrary(
+        progress: @escaping @Sendable (Int) -> Void) -> Snapshot {
+
+        let options = PHFetchOptions()
+        // Hidden items are hidden. A backup that quietly uploaded somebody's Hidden album to the
+        // cloud would be the worst possible reading of "back up my photos".
+        options.includeHiddenAssets = false
+        // Newest first, so an import interrupted at 40% has backed up the photographs somebody took
+        // this month rather than the ones from 2009.
+        options.sortDescriptors = [NSSortDescriptor(key: "creationDate", ascending: false)]
+
+        var assets: [ScannedAsset] = []
+        let results = PHAsset.fetchAssets(with: options)
+        assets.reserveCapacity(results.count)
+
+        results.enumerateObjects { asset, index, _ in
+            // Only what this app can store. `.audio` and `.unknown` exist in a `PHAsset` fetch and
+            // there is nothing in this app that could show one.
+            guard asset.mediaType == .image || asset.mediaType == .video else { return }
+            assets.append(ScannedAsset(
+                localIdentifier: asset.localIdentifier,
+                creationDate: asset.creationDate,
+                isVideo: asset.mediaType == .video,
+                pixelWidth: asset.pixelWidth,
+                pixelHeight: asset.pixelHeight,
+                duration: asset.duration
+            ))
+            if index % 500 == 0 { progress(assets.count) }
+        }
+        progress(assets.count)
+
+        return Snapshot(assets: assets, albumTitles: albumMembership())
+    }
+
+    /// Which user albums each asset belongs to.
+    ///
+    /// User albums only — `.album`, not `.smartAlbum`. "Recently Added", "Selfies", and "Screenshots"
+    /// are computed views over the same library rather than structure somebody built, and recreating
+    /// them in Neutrino as ordinary albums would produce three albums that never update again and a
+    /// Screenshots album with a hundred items in it that the user never made.
+    nonisolated private static func albumMembership() -> [String: [String]] {
+        var membership: [String: [String]] = [:]
+        let collections = PHAssetCollection.fetchAssetCollections(with: .album, subtype: .any,
+                                                                  options: nil)
+        collections.enumerateObjects { collection, _, _ in
+            guard let title = collection.localizedTitle?.trimmingCharacters(in: .whitespaces),
+                  !title.isEmpty else { return }
+            let options = PHFetchOptions()
+            options.includeHiddenAssets = false
+            PHAsset.fetchAssets(in: collection, options: options).enumerateObjects { asset, _, _ in
+                membership[asset.localIdentifier, default: []].append(title)
+            }
+        }
+        return membership
+    }
+
     // MARK: - Originals
+
+    /// Writes an item's original to a temporary file, in whatever format the device holds it.
+    ///
+    /// This is the full-library import's equivalent of what the picker hands over, and it is
+    /// better: the picker returns a *rendering*, this returns the resource. A HEIC comes out as a
+    /// HEIC, a DNG as a DNG, a video as its own container.
+    ///
+    /// Which resource, when there is more than one:
+    ///
+    /// - a **RAW** item's raw resource, for the reason ``writeRAWOriginal(for:)`` gives;
+    /// - otherwise the **edited** render (`.fullSizePhoto` / `.fullSizeVideo`) when the item has
+    ///   one, because that is the picture the user sees in Apple Photos and the one they expect to
+    ///   find in a backup. The same preference is why ``writePairedVideo(for:)`` prefers
+    ///   `.fullSizePairedVideo`;
+    /// - otherwise the original `.photo` / `.video`.
+    func writeOriginal(for identifier: String) async throws -> DeviceOriginal {
+        guard access.isUsable else { throw DeviceLibraryError.notAuthorized }
+        guard let asset = asset(withLocalIdentifier: identifier) else {
+            throw DeviceLibraryError.assetUnavailable
+        }
+        let resources = PHAssetResource.assetResources(for: asset)
+        let isVideo = asset.mediaType == .video
+
+        let preferred: [PHAssetResourceType] = isVideo
+            ? [.fullSizeVideo, .video]
+            : [.fullSizePhoto, .photo, .alternatePhoto]
+        let chosen = (isVideo ? nil : Self.rawResource(among: resources))
+            ?? preferred.lazy.compactMap { type in resources.first { $0.type == type } }.first
+            ?? resources.first
+        guard let resource = chosen else { throw DeviceLibraryError.resourceUnavailable }
+
+        let type = UTType(resource.uniformTypeIdentifier)
+        var ext = type?.preferredFilenameExtension
+            ?? (resource.originalFilename as NSString).pathExtension
+        if ext.isEmpty { ext = isVideo ? "mov" : "jpg" }
+
+        let url = try await write(resource, extension: ext)
+        return DeviceOriginal(
+            url: url,
+            mimeType: type?.preferredMIMEType ?? (isVideo ? "video/quicktime" : "image/jpeg"),
+            fileExtension: ext,
+            originalFileName: resource.originalFilename
+        )
+    }
 
     /// Writes an item's RAW original to a temporary file, untranscoded.
     ///
@@ -415,7 +549,13 @@ final class DevicePhotoLibrary: ObservableObject {
     /// as an `.alternatePhoto` beside a JPEG — so this asks what each resource *is* rather than
     /// where it sits.
     private static func rawResource(for asset: PHAsset) -> PHAssetResource? {
-        PHAssetResource.assetResources(for: asset).first { resource in
+        rawResource(among: PHAssetResource.assetResources(for: asset))
+    }
+
+    /// The same question asked of a resource list already in hand — `assetResources(for:)` is a trip
+    /// across the Photos XPC boundary, and the full-library import asks this once per item.
+    private static func rawResource(among resources: [PHAssetResource]) -> PHAssetResource? {
+        resources.first { resource in
             UTType(resource.uniformTypeIdentifier)?.conforms(to: .rawImage) == true
         }
     }

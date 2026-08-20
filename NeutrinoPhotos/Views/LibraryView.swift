@@ -14,10 +14,13 @@ struct LibraryView: View {
     @EnvironmentObject private var library: PhotoLibraryService
     @EnvironmentObject private var settings: AppSettings
     @EnvironmentObject private var importer: PhotoImportService
+    @EnvironmentObject private var libraryImporter: LibraryImportService
     @EnvironmentObject private var vault: KeyVaultService
     /// Held only to hand on to the viewer — see the `fullScreenCover` below.
     @EnvironmentObject private var thumbnails: ThumbnailCache
     @EnvironmentObject private var deviceLibrary: DevicePhotoLibrary
+    /// Held only to hand on to the import sheet, which explains what it holds.
+    @EnvironmentObject private var ledger: ImportLedger
 
     /// What the picker handed back. Cleared as soon as the import starts so picking the same
     /// photographs twice in a row still fires — an unchanged selection is not a changed binding.
@@ -25,6 +28,7 @@ struct LibraryView: View {
     @State private var viewerStart: MediaItem?
     @State private var hasLoaded = false
     @State private var showsUnlock = false
+    @State private var showsLibraryImport = false
 
     /// The grouped timeline, rebuilt only when the library or the density actually changes.
     /// Deliberately not observed — see ``TimelineCache``.
@@ -100,6 +104,24 @@ struct LibraryView: View {
         .sheet(isPresented: $showsUnlock) {
             VaultUnlockView()
                 .environmentObject(vault)
+        }
+        .sheet(isPresented: $showsLibraryImport) {
+            NavigationStack {
+                // Handed on explicitly for the same reason the viewer's are: a modal's inheritance
+                // of the presenting view's environment is not something to rest a crash on.
+                LibraryImportView()
+                    .environmentObject(libraryImporter)
+                    .environmentObject(deviceLibrary)
+                    .environmentObject(ledger)
+                    .environmentObject(settings)
+                    .toolbar {
+                        ToolbarItem(placement: .navigationBarTrailing) {
+                            // Dismiss rather than stop: an import keeps running with the sheet
+                            // closed, which is the whole point of it being a queue.
+                            Button("Done") { showsLibraryImport = false }
+                        }
+                    }
+            }
         }
         .confirmationDialog("Delete \(selection.count) item(s)?",
                             isPresented: $showsBulkDeleteConfirmation, titleVisibility: .visible) {
@@ -232,13 +254,40 @@ struct LibraryView: View {
                 Button("Done") { selection.end() }
                     .fontWeight(.semibold)
             } else if FeatureFlags.importFromPhotos {
+                importControl
+            }
+        }
+    }
+
+    /// The picker on its own, or a menu offering the picker and the whole library.
+    ///
+    /// A menu only when there is a second thing in it. One item behind a chevron is a tap somebody
+    /// pays on every import for a choice they do not have.
+    @ViewBuilder
+    private var importControl: some View {
+        if FeatureFlags.fullLibraryImport && FeatureFlags.deviceLibraryAccess {
+            Menu {
                 PhotosPicker(selection: $pickerSelection,
                              matching: .any(of: [.images, .videos]),
                              photoLibrary: .shared()) {
-                    Label("Import", systemImage: "square.and.arrow.up")
+                    Label("Select Photos…", systemImage: "photo.on.rectangle")
                 }
-                .disabled(importer.isImporting)
+                Button {
+                    showsLibraryImport = true
+                } label: {
+                    Label("Import Entire Library…", systemImage: "square.stack.3d.up")
+                }
+            } label: {
+                Label("Import", systemImage: "square.and.arrow.up")
             }
+            .disabled(importer.isImporting)
+        } else {
+            PhotosPicker(selection: $pickerSelection,
+                         matching: .any(of: [.images, .videos]),
+                         photoLibrary: .shared()) {
+                Label("Import", systemImage: "square.and.arrow.up")
+            }
+            .disabled(importer.isImporting)
         }
     }
 
@@ -334,6 +383,7 @@ struct LibraryView: View {
             if importer.isImporting {
                 importProgress
             }
+            libraryImportBanner
             if let reason = importer.blockedReason {
                 banner(reason, systemImage: "exclamationmark.triangle", tint: .orange)
             }
@@ -384,6 +434,78 @@ struct LibraryView: View {
             }
             .buttonStyle(.plain)
         }
+    }
+
+    /// The full-library run, as the timeline shows it.
+    ///
+    /// Its own banner rather than a line in the picker's: the two are different runs with different
+    /// lifetimes, and the one that matters here is the one that can still be going after a
+    /// relaunch. An interrupted queue is the important case — a user who force-quit the app
+    /// mid-import has no other way to find out that two thousand photographs are still waiting.
+    @ViewBuilder
+    private var libraryImportBanner: some View {
+        if FeatureFlags.fullLibraryImport {
+            switch libraryImporter.phase {
+            case .running, .waiting, .scanning:
+                Button {
+                    showsLibraryImport = true
+                } label: {
+                    libraryImportProgress
+                }
+                .buttonStyle(.plain)
+            case .interrupted:
+                Button {
+                    showsLibraryImport = true
+                } label: {
+                    banner("Import interrupted — \(libraryImporter.counts.pending) item(s) left. Tap to resume.",
+                           systemImage: "arrow.clockwise", tint: .accentColor)
+                }
+                .buttonStyle(.plain)
+            case .paused(let reason?):
+                Button {
+                    showsLibraryImport = true
+                } label: {
+                    banner(reason, systemImage: "exclamationmark.triangle", tint: .orange)
+                }
+                .buttonStyle(.plain)
+            case .idle, .finished, .paused:
+                EmptyView()
+            }
+        }
+    }
+
+    private var libraryImportProgress: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack {
+                Text(libraryImportTitle)
+                    .font(.footnote.weight(.medium))
+                Spacer()
+                if case .running = libraryImporter.phase,
+                   let remaining = ImportRate.formatted(remaining: libraryImporter.estimatedTimeRemaining) {
+                    Text("about \(remaining) left")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                }
+            }
+            ProgressView(value: libraryImporter.counts.fraction)
+            if case .waiting(let reason) = libraryImporter.phase {
+                Text(reason)
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(2)
+            }
+        }
+        .padding(.horizontal)
+        .padding(.vertical, 8)
+        .background(.bar)
+        .foregroundStyle(.primary)
+    }
+
+    private var libraryImportTitle: String {
+        if case .scanning(let found) = libraryImporter.phase {
+            return found == 0 ? "Scanning your library…" : "Scanning… \(found) found"
+        }
+        return "Importing \(libraryImporter.counts.finished) of \(libraryImporter.counts.total)"
     }
 
     private var importProgress: some View {

@@ -35,6 +35,7 @@ its own Settings > Encryption page, chosen in the app or simply tapped in Files.
 | Viewer | Full screen, progressive load (thumbnail → preview → original on zoom), pinch and double-tap zoom to 10×, clamped pan, swipe between items, info panel | COMPLETE |
 | Video | Playback of the decrypted original, streamed to disk rather than held | COMPLETE |
 | Import | Multi-select from the system picker, HEIC→JPEG, EXIF capture date, thumbnail, upload progress, cancel, duplicate skip | COMPLETE |
+| Full-library import | Scan the whole device library, resumable queue with pause and retry, incremental re-runs, albums recreated, progress and ETA | COMPLETE |
 | Photo library | Optional `PHPhotoLibrary` access: real capture dates, favorites, coordinates, Live Photo motion, RAW originals, save back to the device | COMPLETE |
 | Metadata | Dimensions, camera, lens, exposure, coordinates — extracted on device and published, with location held back by default | COMPLETE |
 | Media pipeline | Rendition ladder, encrypted preview beside each original, capped and evicted caches of decrypted media, SQLite library index | COMPLETE |
@@ -48,10 +49,12 @@ the other three under the user's thumb.
 
 `FeatureFlags` is the honest list of what is *not* here yet: automatic backup, offline mode, search,
 places, people, memories, editing, sharing, and Universal Links. Each is a flag set to `false`
-rather than a half-built screen. One flag is `true` and still worth naming: `deviceLibraryAccess`
-covers everything that talks to `PHPhotoLibrary`, and it is separate from `importFromPhotos` because
-it is the only thing in this app that asks for a permission the user can refuse — a build with it
-off is a working app that never shows a photo-library prompt.
+rather than a half-built screen. Two flags are `true` and still worth naming, and both split off
+from `importFromPhotos` for the same reason: `deviceLibraryAccess` covers everything that talks to
+`PHPhotoLibrary` — the only thing in this app that asks for a permission the user can refuse — and
+`fullLibraryImport` covers the run that walks a whole camera roll unattended. A build with either
+off is a working app: one that never shows a photo-library prompt, and one whose import is exactly
+what you picked in the picker.
 
 ## Architecture
 
@@ -73,10 +76,13 @@ NeutrinoPhotosApp        composition root — every service constructed once, in
 │   ├── MediaRendition   the ladder — thumbnail, preview, original — and how each is made
 │   └── DiskCache        decrypted media, capped and evicted least-recently-used
 ├── ThumbnailCache       the grid's bitmaps: NSCache over that same DiskCache
-├── LocalStore           SQLite — the timeline before the network answers, and the rendition index
-├── PhotoImportService   picker → prepare → upload → register, one item at a time
+├── LocalStore           SQLite — the timeline, the rendition index, the import ledger and queue
+├── MediaImportPipeline  one item, end to end: de-duplicate → upload → register → enrich
 │   ├── ImagePreparation what the picker hands over, turned into what Drive should store
-│   └── MediaMetadataEx… dimensions, camera, exposure, coordinates — read off the plaintext
+│   ├── MediaMetadataEx… dimensions, camera, exposure, coordinates — read off the plaintext
+│   └── ImportLedger     what this device has already uploaded, by asset id and by content hash
+├── PhotoImportService   the picker's half: selection → bytes → the pipeline, one item at a time
+├── LibraryImportService the whole library: scan → resumable queue → the same pipeline
 ├── DevicePhotoLibrary   the device's own library: what Apple Photos knows, and saving back to it
 ├── NetworkMonitor       connectivity and whether the path is metered
 ├── AppSettings          preferences, in UserDefaults
@@ -299,10 +305,63 @@ streaming download reads that before it decrypts anything. It also means a chunk
 readable by today's web client — which is why the chunking threshold sits at 64 MB, above every
 photograph and below every video. Pictures stay interoperable; videos stay openable.
 
-Duplicate detection is a SHA-256 of the prepared bytes, kept on the device (hashed a block at a time
-for a video, for the same reason as everything else here). It has to be local: the server stores
-ciphertext and cannot compare two uploads for sameness. It catches the common case — the same
-photographs picked twice — and Settings can forget the record.
+### Moving a whole library across
+
+There are two ways in — the picker, and a full-library run — and they share everything below the
+point where the bytes come from. `MediaImportPipeline` is that shared part: de-duplicate, upload,
+register, then the best-effort tail of favourite flag, Live Photo motion, and metadata. Two copies
+of it would have diverged into a photograph that arrives with its EXIF on one route and without it
+on the other.
+
+The full run is a **scan** and a **queue**. The scan walks `PHAsset.fetchAssets` on a detached task —
+fifty thousand assets is tens of thousands of trips across the Photos XPC boundary, and doing that
+on the main actor means the count it is reporting never draws — and writes what it finds into a
+SQLite table, newest first, with each item's album titles on its row. The run takes one row at a
+time, and writes the outcome back before starting the next.
+
+That last sentence is the whole design. Being killed mid-import costs at most the item in flight,
+and that one is still `pending`, so the next launch finds pending rows, says the import was
+interrupted, and offers to carry on. Pause is the same mechanism with a button on it.
+
+**Running it twice adds nothing**, which is the property the epic is actually judged on.
+`ImportLedger` is the one record both importers consult, keyed two ways because neither is enough on
+its own:
+
+| Key | Catches | Misses |
+|---|---|---|
+| `PHAsset.localIdentifier` | the same asset, re-encoded or re-rendered; known *before* any bytes are read | items with no asset — a picker import with no library access; another device's copy |
+| SHA-256 of the uploaded bytes | the same picture arriving from anywhere | the same picture re-encoded |
+
+The identifier is what makes a re-scan cheap: forty-nine thousand of fifty thousand assets are
+skipped without touching the disk. The hash costs a read, so it is checked once per item actually
+being imported. Both live in the local database — the server holds ciphertext and cannot compare two
+uploads for sameness — and both go when you sign out, because the next account on this device has
+none of these photographs.
+
+**Progress is measured in bytes**, since a library is mostly photographs by count and mostly video
+by size, and an item-counting bar sits at 99% through the part that takes longest. Those bytes are
+estimated from each item's dimensions and duration: the Photos framework does not publish a
+resource's file size, and this app will not read the private `fileSize` key to draw a bar. That is
+sound because the estimate and the measured throughput are in the *same units*, so a systematic bias
+cancels out of both the fraction and the ETA. The ETA also excludes paused time — a run resumed the
+next morning would otherwise tell somebody with ten items left that they had four days to wait — and
+says nothing at all for the first few seconds, because a wildly wrong first estimate is the number
+people plan around.
+
+**Three things can stop a run, and they are treated differently.** No network or an overheating
+phone *hold*, with an explanation, and clear themselves. A merely warm phone is not a stop at all,
+just a pause between items — sustained import is exactly the workload that drives a phone into
+throttling, and doing less per minute is the fix. Running out of storage stops the run outright,
+because polling would be a spinner over a message somebody has to act on.
+
+**A failing item never stalls the queue.** A failure is recorded on its row and the run moves on; at
+the end of a pass, everything under three attempts goes back in the queue, so a poison item is
+retried *around* the rest of the library rather than in front of it. After that it waits in a failed
+list with its error, and there is a Retry button.
+
+What this is *not* is background upload: the run needs the app in the foreground, and
+`beginBackgroundTask` buys only the seconds after a home-press so the item in flight can finish.
+Uploading with the app closed needs a background `URLSession` and is `FeatureFlags.automaticBackup`.
 
 ## Known Gaps
 
@@ -320,11 +379,18 @@ carries `applinks` only. Until it does, the assertion fails with a domain error 
 falls back to the password, which is why a passkey is offered beside the other methods and never
 instead of them.
 
-**No automatic or full-library import.** Photo-library access is in — it is what an import reads
-capture dates, favourites, Live Photo motion, and RAW originals through — but nothing *enumerates*
-the library yet. Importing is still what you pick in the picker. Moving a whole camera roll across
-once, with a pause/resume queue and duplicate detection, is Epic 6; watching for new photographs
-with `PHPhotoLibraryChangeObserver` and `BGTaskScheduler` is `FeatureFlags.automaticBackup`.
+**No automatic backup.** A whole camera roll can now be moved across in one resumable run, but
+somebody has to start it and leave the app open. Nothing watches for *new* photographs: there is no
+`PHPhotoLibraryChangeObserver`, no background `URLSession`, and no `BGTaskScheduler` registration,
+so a picture taken with the Camera app sits there until the next import. That is
+`FeatureFlags.automaticBackup`, and it is `false`.
+
+**Album structure survives only as far as Drive can express it.** Neutrino albums are a flat list of
+titles containing photographs, so that is what a full import recreates — matched by title, created
+if absent. Nested folders, an album's own ordering, and smart albums have nowhere to go. Smart
+albums are skipped deliberately rather than for want of an endpoint: "Recently Added", "Selfies",
+and "Screenshots" are views over the library, and copies of them would be albums that never update
+again. Hidden items are never imported at all.
 
 **Live Photos and RAW are stored, not rendered.** A Live Photo's paired video is uploaded, indexed,
 and restorable to Apple Photos as a Live Photo; the viewer does not play it in place, and the grid
@@ -350,7 +416,7 @@ xcodebuild test -project NeutrinoPhotos.xcodeproj -scheme NeutrinoPhotos \
   -destination "platform=iOS Simulator,name=iPhone 17 Pro,OS=latest"
 ```
 
-306 tests. HTTP is exercised end to end against `MockURLProtocol` — real requests, real decoding, real
+362 tests. HTTP is exercised end to end against `MockURLProtocol` — real requests, real decoding, real
 status handling — rather than behind a protocol seam. The crypto is *not* mocked: `TestKeys` installs
 a genuine X25519 pair, so the seal / unseal / secretstream round trip is asserted for what it is.
 The caches and the database are real too, in a temporary directory per test — a cache that is stubbed
@@ -361,11 +427,18 @@ a `CFDictionary` — and the hemisphere-ref bug that puts Santiago in Boston sho
 real APP1 segment.
 
 `PHAsset` cannot be constructed and a simulator has no camera roll, so nothing downstream of the
-Photos framework is tested through it. That is what `DeviceAsset` is for: a plain value holding
-everything the importer needs from an asset, so the extraction, merging, redaction, and publishing
-are all assertable without a photo library. `DevicePhotoLibrary` itself is covered for what it
-*decides* — the authorization mapping, and that constructing it prompts for nothing, which is the
-one thing that would otherwise put a permission alert in front of every user on first launch.
+Photos framework is tested through it. That is what `DeviceAsset` and `ScannedAsset` are for: plain
+values holding everything the importers need from an asset, so the extraction, merging, redaction,
+publishing, and size estimation are all assertable without a photo library. `DevicePhotoLibrary`
+itself is covered for what it *decides* — the authorization mapping, and that constructing it
+prompts for nothing, which is the one thing that would otherwise put a permission alert in front of
+every user on first launch.
+
+The import queue is tested against a real SQLite file rather than a stub, because the property under
+test is that a *process* can die between two items and lose nothing: a store is written, a second
+one is opened over the same path with nothing closed politely, and it has to resume at the right row
+rather than at the top. The ETA and the throughput are driven by explicit `Date`s, which is what
+makes "an eight-hour pause must not change the estimate" a test that runs in a millisecond.
 
 The pipeline's own assertion is that an uploaded original comes back byte for byte: the bytes go out
 through the multipart upload, are pulled back out of the captured request body exactly as the server

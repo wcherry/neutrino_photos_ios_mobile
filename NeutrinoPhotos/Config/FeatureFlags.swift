@@ -50,6 +50,17 @@ enum FeatureFlags {
     /// not a broken one.
     static let deviceLibraryAccess: Bool = true
 
+    /// Importing the whole device library in one run: the scan, the resumable queue behind it, the
+    /// duplicate ledger both importers share, and the album structure that travels with it.
+    ///
+    /// The Epic 6 half of the roadmap's `import` flag, separated from ``importFromPhotos`` for the
+    /// same reason ``deviceLibraryAccess`` was: this is the path that asks for photo-library
+    /// permission and then does thousands of uploads unattended, and a build with it off is a
+    /// working app whose import is exactly what the user picked in the picker.
+    ///
+    /// It needs ``deviceLibraryAccess`` — there is no library to walk without it.
+    static let fullLibraryImport: Bool = true
+
     /// Favorites — the photo record's `isStarred` flag, shared with the web app.
     static let favorites: Bool = true
 

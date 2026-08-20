@@ -167,26 +167,40 @@ struct PhotoAccessView: View {
 
     // MARK: - Not yet
 
-    /// Named rather than implied. Access is the doorway to two epics that are not in this build, and
-    /// a user who grants it should not be left wondering why nothing started importing.
+    /// Named rather than implied. Access is the doorway to the two unattended paths, and a user who
+    /// grants it should not be left wondering what it bought them.
     private var comingSection: some View {
         Section {
+            if FeatureFlags.fullLibraryImport {
+                NavigationLink {
+                    LibraryImportView()
+                } label: {
+                    HStack {
+                        Image(systemName: "checkmark.circle.fill")
+                            .foregroundStyle(.green)
+                        Text("Import the whole library at once")
+                    }
+                }
+                .disabled(!deviceLibrary.access.isUsable)
+            } else {
+                HStack {
+                    Image(systemName: "circle")
+                        .foregroundStyle(.secondary)
+                    Text("Import the whole library at once")
+                }
+            }
             HStack {
                 Image(systemName: FeatureFlags.automaticBackup ? "checkmark.circle.fill" : "circle")
                     .foregroundStyle(FeatureFlags.automaticBackup ? .green : .secondary)
                 Text("Automatic backup of new photos")
             }
-            HStack {
-                Image(systemName: "circle")
-                    .foregroundStyle(.secondary)
-                Text("Import the whole library at once")
-            }
         } header: {
-            Text("Not Here Yet")
+            Text("What This Unlocks")
         } footer: {
             Text("""
-                 Both need this permission and neither is in this build. Until then, importing is \
-                 what you pick in the photo picker.
+                 Full-library import walks everything on this device and uploads what isn't in your \
+                 account yet. Automatic backup — new photos uploading without opening the app — \
+                 isn't in this build.
                  """)
         }
     }

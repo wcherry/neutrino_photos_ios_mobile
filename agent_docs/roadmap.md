@@ -123,9 +123,15 @@ than as prose — `LocalStore` and `MediaRendition`, both with their rationale o
 
 Four remain, and they are the four an implementation can defer until the epic that needs them:
 the sync cursor and conflict rule (Epic 10), the background task architecture (Epic 7), and the
-error/retry policy (Epic 7 — there is still no backoff curve or poison-item handling anywhere in
-the tree). `FeatureFlags.offlineMode` and `FeatureFlags.automaticBackup` are `false` for exactly
-that reason.
+error/retry policy (Epic 7). `FeatureFlags.offlineMode` and `FeatureFlags.automaticBackup` are
+`false` for exactly that reason.
+
+**Amended after Epic 6.** Half of the error/retry policy now exists as working code rather than as
+prose, and the half that exists is the poison-item half: `LibraryImportService` retries a failed
+item up to `maximumAttempts` across *passes* over the queue rather than in place, so one item can
+never stall the rest, and after that it waits in a failed list with its message. There is still no
+backoff *curve* — the network hold is a fixed poll, not exponential — and nothing outside the import
+queue retries at all. Epic 7 is what generalises it.
 
 `architecture.md` has not been written. What belongs in it now lives in `README.md` and in the doc
 comments on `MediaContentService`, `MediaRendition`, `LocalStore`, and `DiskCache` — that covers
@@ -584,16 +590,93 @@ Covers mvp.md §3 (full-library path), §19 items 4.
 
 **Deliverables**
 
-- [ ] Full-library scan and enumeration with a live count
-- [ ] Import queue with pause/resume and per-item retry
-- [ ] Duplicate detection — content hash plus `PHAsset.localIdentifier`, so re-running the
+- [x] Full-library scan and enumeration with a live count
+      — `DevicePhotoLibrary.scan(onProgress:)`, and the part that matters is where it runs.
+      `enumerateObjects` over fifty thousand assets is tens of thousands of trips across the Photos
+      XPC boundary, so the walk happens on a detached task and only the count hops back to the main
+      actor. It also reads *less* per asset than Epic 5's `DeviceAsset` does: `ScannedAsset` exists
+      because asking `PHAssetResource.assetResources(for:)` whether each item is RAW — which the
+      full record needs — is cheap over forty picked items and minutes of wall clock over a real
+      library. The full record is fetched one item at a time, when that item is imported.
+- [x] Import queue with pause/resume and per-item retry
+      — `import_queue` in `LocalStore` (schema v2) and the loop over it in `LibraryImportService`.
+      Pause cancels the task; the rows stay. Retry is two-tier: a failed item is re-queued
+      automatically at the end of each pass while its attempt count is under
+      `LibraryImportService.maximumAttempts`, so a poison item is retried *around* the rest of the
+      library rather than in front of it, and after three attempts it waits in a failed list with
+      its error message for the user to retry by hand. A single item failing can never stall the
+      queue, which is Epic 7's step 8 arriving an epic early because the queue is the same shape.
+- [x] Duplicate detection — content hash plus `PHAsset.localIdentifier`, so re-running the
       import doesn't double the library
-- [ ] Incremental import: only what's new since the last run
-- [ ] Album structure preserved where Drive can express it
-- [ ] Progress UI: items done / total, bytes, ETA, current item
-- [ ] Import survives app backgrounding and termination — resumes where it stopped
+      — `ImportLedger`, and the important part is that there is exactly **one** of them. Both
+      importers consult it: two records would mean a photograph picked in the picker and later found
+      by a scan gets uploaded twice, which is the same bug this deliverable exists to prevent
+      arriving by the back door. `PhotoImportService`'s `UserDefaults` list of fingerprints is gone,
+      migrated into `imported_asset` on first launch — losing it on upgrade would have re-uploaded
+      every existing user's library. Two keys because neither is enough: the identifier is known
+      *before* any bytes are read (which is what lets a re-scan skip 49,000 of 50,000 assets without
+      touching the disk) and survives a re-encode; the hash catches what has no asset to name — an
+      item imported with no library access, or AirDropped from another phone.
+- [x] Incremental import: only what's new since the last run
+      — the same code path, deliberately. "New since the last run" and "not in the ledger" are the
+      same set, and the second definition cannot drift out of step with reality the way a date
+      cursor can: an item restored from a backup, or added to a shared album months after it was
+      taken, has an old creation date and is still new here.
+- [x] Album structure preserved where Drive can express it
+      — the device album titles an item belongs to travel **on its queue row**, not in a map held by
+      the run, because after a relaunch the run that finishes an item has no memory of the scan that
+      found it. Each is matched to a Neutrino album by title or created, then the photo is added.
+      User albums only: "Recently Added", "Selfies", and "Screenshots" are `.smartAlbum` — views over
+      the library rather than structure somebody built — and copies of them would be albums that
+      never update again. Only fresh imports are filed; an item skipped as a duplicate may already
+      be in albums the user has since edited by hand, and re-adding it on every incremental run
+      would slowly undo those edits.
+- [x] Progress UI: items done / total, bytes, ETA, current item
+      — `LibraryImportView`, plus a banner on the timeline so a run is visible without opening it.
+      Progress is measured in **bytes rather than items**: a library is mostly photographs by count
+      and mostly video by size, and an item-counting bar sits at 99% through the part that takes the
+      longest. The bytes are estimates — the Photos framework does not publish a resource's size,
+      and this app will not read the private `fileSize` key for a number that only draws a bar — but
+      the estimate and the throughput are in the *same units*, so a systematic bias cancels in both
+      the fraction and the ETA. See `ImportSizeEstimate`. The ETA excludes paused time, or a run
+      resumed the next morning would tell somebody with ten items left that they had four days to
+      wait, and says nothing at all for the first eight seconds.
+- [x] Import survives app backgrounding and termination — resumes where it stopped
+      — every outcome is written to its row before the next item begins, so being killed costs at
+      most the item in flight, and that one is still `pending`. A launch that finds pending rows
+      reports `.interrupted` rather than either silently restarting a 2,000-item upload or silently
+      forgetting it. `beginBackgroundTask` buys the seconds after a home-press so the item in flight
+      finishes rather than being killed halfway. This is **not** background upload — that needs a
+      background `URLSession` and is Epic 7.
 
-**Flag:** `import` (shared with Epic 5)
+**Flag:** `import` — spelled `importFromPhotos` and shared with Epic 5, plus **`fullLibraryImport`**
+for this epic's half, on the Epic 5 precedent: it is the path that asks for a permission and then
+does thousands of unattended uploads, and a build with it off is a working app whose import is
+exactly what the user picked in the picker.
+
+**Status (2026-08-19):** all seven deliverables are implemented; **362 unit tests pass** (up from
+306). Three things are worth knowing:
+
+- **One refactor went in alongside them, and it was forced rather than tidy.** The per-item
+  pipeline — upload, register, de-duplicate, favourite, Live Photo motion, metadata — moved out of
+  `PhotoImportService` into `MediaImportPipeline`, which both importers now share. Two copies would
+  have diverged into a photograph that arrives with its EXIF on one route and without it on the
+  other, and, more immediately, into two duplicate records that do not know about each other.
+- **Covered by the suite:** the ledger's two keys, its migration from `UserDefaults`, and that
+  signing out takes it with it (a ledger surviving into the next account leaves them an empty
+  library and an import that reports nothing to do); the queue surviving a `LocalStore` reopened
+  from scratch mid-run and resuming at the right row rather than the top; the retry ladder,
+  including that an item at its attempt limit stays failed while everything else drains; the byte
+  arithmetic, the in-memory count bookkeeping that avoids a table scan per item, and the ETA's
+  refusal to guess early or to count paused time; and the three hold reasons, which are the whole of
+  what a stalled import tells the user and each name a different fix.
+- **Not covered, and not coverable here:** every one of the nine manual verification steps.
+  `PHAsset` cannot be constructed and a simulator has no camera roll, so nothing downstream of the
+  Photos framework is reachable from a test — the same constraint Epic 5 documented. Step 1's exact
+  count, step 8's thermals, and step 9's albums all need the test library on a physical device.
+  The schema migration *has* been verified for real: the simulator's existing v1 database came up at
+  `user_version = 2` with both new tables, which is the upgrade path an installed device takes.
+  **M3 is not closed by this epic**; Epics 7 and 8 remain, as do these steps.
 
 **Manual verification**
 

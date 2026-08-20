@@ -14,6 +14,8 @@ struct SettingsView: View {
     @EnvironmentObject private var vault: KeyVaultService
     @EnvironmentObject private var drive: PhotosDriveService
     @EnvironmentObject private var deviceLibrary: DevicePhotoLibrary
+    @EnvironmentObject private var ledger: ImportLedger
+    @EnvironmentObject private var libraryImporter: LibraryImportService
 
     @State private var deviceName = DeviceIdentity.deviceName
     @State private var showsSignOutConfirmation = false
@@ -80,15 +82,30 @@ struct SettingsView: View {
             Toggle("Upload over Wi-Fi only", isOn: $settings.wifiOnlyUploads)
             LabeledContent("Connection", value: connectionDescription)
             Button("Forget import history") { importer.forgetImportHistory() }
-                .disabled(importer.importedCount == 0)
+                .disabled(ledger.count == 0)
         } header: {
             Text("Uploads")
         } footer: {
             Text("""
-                 This device remembers \(importer.importedCount) uploaded item(s) so importing the \
-                 same photos twice doesn't duplicate them. The record is local — the server stores \
-                 only ciphertext and cannot compare two photos for sameness.
+                 This device remembers \(ledger.count) uploaded item(s) — by their identity in \
+                 Apple Photos and by a hash of their bytes — so importing the same photos twice \
+                 doesn't duplicate them. The record is local: the server stores only ciphertext and \
+                 cannot compare two photos for sameness.
                  """)
+        }
+    }
+
+    /// What the Import library row says on its right-hand side — the state a user would want to see
+    /// without opening it, which is almost always "is it still going".
+    private var libraryImportSummary: String {
+        switch libraryImporter.phase {
+        case .scanning:                return "Scanning…"
+        case .running, .waiting:       return "\(libraryImporter.counts.pending) left"
+        case .interrupted:             return "Paused — \(libraryImporter.counts.pending) left"
+        case .paused where libraryImporter.counts.hasWorkLeft:
+            return "Paused — \(libraryImporter.counts.pending) left"
+        case .finished, .paused, .idle:
+            return libraryImporter.lastCompletedAt == nil ? "" : "Up to date"
         }
     }
 
@@ -105,6 +122,13 @@ struct SettingsView: View {
                 PhotoAccessView()
             } label: {
                 LabeledContent("Photo library access", value: deviceLibrary.access.displayName)
+            }
+            if FeatureFlags.fullLibraryImport {
+                NavigationLink {
+                    LibraryImportView()
+                } label: {
+                    LabeledContent("Import library", value: libraryImportSummary)
+                }
             }
             Toggle("Keep Live Photo motion", isOn: $settings.importsLivePhotoMotion)
                 .disabled(!deviceLibrary.access.isUsable)
@@ -265,6 +289,7 @@ private struct RoadmapView: View {
     private let planned: [(String, Bool)] = [
         ("Local cache and library index", FeatureFlags.mediaPipeline),
         ("Photo library integration", FeatureFlags.deviceLibraryAccess),
+        ("Full-library import", FeatureFlags.fullLibraryImport),
         ("Automatic backup", FeatureFlags.automaticBackup),
         ("Offline browsing", FeatureFlags.offlineMode),
         ("Search", FeatureFlags.search),

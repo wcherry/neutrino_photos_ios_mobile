@@ -22,6 +22,8 @@ struct NeutrinoPhotosApp: App {
     @StateObject private var albums: AlbumService
     @StateObject private var content: MediaContentService
     @StateObject private var importer: PhotoImportService
+    @StateObject private var libraryImporter: LibraryImportService
+    @StateObject private var ledger: ImportLedger
     @StateObject private var vault: KeyVaultService
     @StateObject private var devices: DeviceSessionService
     @StateObject private var drive: PhotosDriveService
@@ -56,12 +58,20 @@ struct NeutrinoPhotosApp: App {
         // authorization status and prompts for nothing until something asks it to, so building it
         // does not show the user a permission alert.
         let deviceLibrary = DevicePhotoLibrary()
+        let albums = AlbumService(api: api)
+        // One record of what this device has uploaded, shared by both importers. Two records would
+        // mean a photograph picked in the picker and then found again by a full-library scan gets
+        // uploaded twice — see `ImportLedger`.
+        let ledger = ImportLedger(store: store)
+        let pipeline = MediaImportPipeline(content: content, library: library, settings: settings,
+                                           ledger: ledger, deviceLibrary: deviceLibrary)
 
         self.store = store
         _api = StateObject(wrappedValue: api)
         _library = StateObject(wrappedValue: library)
-        _albums = StateObject(wrappedValue: AlbumService(api: api))
+        _albums = StateObject(wrappedValue: albums)
         _content = StateObject(wrappedValue: content)
+        _ledger = StateObject(wrappedValue: ledger)
         _drive = StateObject(wrappedValue: drive)
         _thumbnails = StateObject(wrappedValue: thumbnails)
         _settings = StateObject(wrappedValue: settings)
@@ -71,7 +81,11 @@ struct NeutrinoPhotosApp: App {
         _deviceLibrary = StateObject(wrappedValue: deviceLibrary)
         _importer = StateObject(wrappedValue: PhotoImportService(
             content: content, library: library, settings: settings, monitor: monitor, vault: vault,
-            deviceLibrary: deviceLibrary
+            deviceLibrary: deviceLibrary, ledger: ledger
+        ))
+        _libraryImporter = StateObject(wrappedValue: LibraryImportService(
+            pipeline: pipeline, deviceLibrary: deviceLibrary, settings: settings, monitor: monitor,
+            albums: albums, store: store
         ))
     }
 
@@ -87,6 +101,8 @@ struct NeutrinoPhotosApp: App {
                 .environmentObject(albums)
                 .environmentObject(content)
                 .environmentObject(importer)
+                .environmentObject(libraryImporter)
+                .environmentObject(ledger)
                 .environmentObject(vault)
                 .environmentObject(devices)
                 .environmentObject(drive)
@@ -119,6 +135,11 @@ struct NeutrinoPhotosApp: App {
         api.authService = authService
 
         guard authService.isAuthenticated else { return }
+        // Before anything else that could import: the ledger is what keeps a second run from
+        // doubling the library, and an importer that started before it hydrated would have an empty
+        // one. `restore()` hydrates it and reads back a queue the last launch was killed mid-way
+        // through — see `LibraryImportService.restore()`.
+        await libraryImporter.restore()
         await authService.refreshTokenIfNeeded()
         // A session restored from the Keychain has tokens but no profile — login is where the
         // other one comes from, and a relaunch doesn't go through it.
@@ -144,6 +165,7 @@ private struct RootView: View {
     @EnvironmentObject private var keyFiles: KeyFileRouter
     @EnvironmentObject private var library: PhotoLibraryService
     @EnvironmentObject private var content: MediaContentService
+    @EnvironmentObject private var libraryImporter: LibraryImportService
 
     @State private var showsUnlock = false
     @State private var hasOfferedUnlock = false
@@ -183,15 +205,23 @@ private struct RootView: View {
                 // Signing out has to empty the device's copy of the library, not just the screen.
                 // The next account to sign in here would otherwise hydrate the previous one's
                 // timeline from the local database and draw somebody else's photographs until the
-                // first listing came back.
+                // first listing came back — and, worse, find an import ledger claiming their whole
+                // camera roll was already uploaded.
                 Task {
+                    await libraryImporter.reset()
                     await library.clearLocalCopy()
                     content.clearCache()
                 }
                 return
             }
             hasOfferedUnlock = false
-            Task { await vault.refresh() }
+            Task {
+                await vault.refresh()
+                // The launch-time call in `configure()` is skipped for a signed-out start, so this
+                // is the only one a fresh sign-in gets. Without it the ledger stays empty and the
+                // first import re-uploads whatever this device sent before.
+                await libraryImporter.restore()
+            }
         }
     }
 

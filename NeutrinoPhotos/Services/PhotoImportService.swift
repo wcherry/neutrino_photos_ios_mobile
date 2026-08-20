@@ -1,4 +1,3 @@
-import CryptoKit
 import Foundation
 import PhotosUI
 import SwiftUI
@@ -8,6 +7,10 @@ import os.log
 // MARK: - PhotoImportService
 
 /// Imports items chosen in the system photo picker: prepare, encrypt, upload, register.
+///
+/// The upload itself, the duplicate check, and everything that follows a successful item belong to
+/// ``MediaImportPipeline``, which ``LibraryImportService`` shares — see that type for why. What is
+/// left here is the picker's half: turning a `PhotosPickerItem` into bytes, and reporting a run.
 ///
 /// ## Why one at a time
 ///
@@ -67,8 +70,9 @@ final class PhotoImportService: ObservableObject {
 
     // MARK: - Dependencies
 
-    private let content: MediaContentService
-    private let library: PhotoLibraryService
+    /// Upload, register, de-duplicate, enrich. Shared with the full-library importer.
+    private let pipeline: MediaImportPipeline
+
     private let settings: AppSettings
     private let monitor: NetworkMonitor
 
@@ -90,33 +94,22 @@ final class PhotoImportService: ObservableObject {
 
     private var task: Task<Void, Never>?
 
-    /// SHA-256 of the bytes this device has already uploaded.
-    ///
-    /// Device-local by necessity: the server stores ciphertext, so it cannot compare two uploads
-    /// for sameness, and nothing in the API answers "do you already have this picture?". What this
-    /// does catch is the common case — the same photograph picked twice, or a second import run
-    /// over a selection that overlaps the first.
-    private var fingerprints: Set<String>
-
-    private static let fingerprintsKey = "import.fingerprints"
-
-    private let defaults: UserDefaults
-
     // MARK: - Init
 
     init(content: MediaContentService, library: PhotoLibraryService,
          settings: AppSettings, monitor: NetworkMonitor,
          vault: KeyVaultService? = nil,
          deviceLibrary: DevicePhotoLibrary? = nil,
+         ledger: ImportLedger? = nil,
          defaults: UserDefaults = .standard) {
-        self.content = content
-        self.library = library
         self.settings = settings
         self.monitor = monitor
         self.vault = vault
         self.deviceLibrary = deviceLibrary
-        self.defaults = defaults
-        self.fingerprints = Set(defaults.stringArray(forKey: Self.fingerprintsKey) ?? [])
+        self.pipeline = MediaImportPipeline(
+            content: content, library: library, settings: settings,
+            ledger: ledger ?? ImportLedger(defaults: defaults), deviceLibrary: deviceLibrary
+        )
     }
 
     // MARK: - Importing
@@ -158,7 +151,6 @@ final class PhotoImportService: ObservableObject {
             self.currentName = nil
             self.isImporting = false
             self.task = nil
-            self.persistFingerprints()
             // Paired videos and RAW originals are written to disk on the way through. A cancelled
             // run leaves the one it was holding, and a library of Live Photos is gigabytes of them.
             self.deviceLibrary?.clearStaging()
@@ -224,87 +216,16 @@ final class PhotoImportService: ObservableObject {
             }
             currentName = name
 
-            let bytes = prepared.data
-            let fingerprint = await Task.detached(priority: .userInitiated) {
-                Self.fingerprint(of: bytes)
-            }.value
-            guard !fingerprints.contains(fingerprint) else {
-                skipped += 1
-                logger.debug("skipped a duplicate: \(name, privacy: .public)")
-                return
-            }
-
-            let fileID = try await content.upload(
-                data: prepared.data, fileName: name, mimeType: prepared.mimeType,
-                thumbnailBase64: prepared.thumbnailBase64,
+            let outcome = try await pipeline.importPhoto(
+                prepared, fileName: name, device: device,
                 onProgress: { [weak self] fraction in self?.currentFraction = fraction }
             )
-            // The asset's date first. EXIF is absent from screenshots, screen recordings, and
-            // anything an editor exported, and every one of those would otherwise file itself under
-            // today — which is verification step 2's failure, on a fair slice of a real library.
-            let item = try await library.register(fileID: fileID,
-                                                  captureDate: device?.creationDate
-                                                    ?? prepared.captureDate)
-            fingerprints.insert(fingerprint)
-            logger.debug("imported \(name, privacy: .public) as \(fileID, privacy: .public)")
-
-            await finish(item: item, bytes: prepared.data, device: device)
+            if outcome.wasDuplicate { skipped += 1 }
         } catch is CancellationError {
             logger.debug("import cancelled")
         } catch {
             logger.error("import failed for \(name, privacy: .public): \(error, privacy: .public)")
             failures.append(Failure(name: name, message: error.localizedDescription))
-        }
-    }
-
-    // MARK: - After the original is safe
-
-    /// Everything that happens once the photograph itself is uploaded and registered: its
-    /// favourite flag, its Live Photo motion, and its metadata.
-    ///
-    /// Every step here is best-effort by design. The picture is in the account by the time this
-    /// runs, and none of this is the picture — failing an import because a *flag* would not set, or
-    /// because the metadata index refused, would trade the thing that matters for the thing that
-    /// does not. Each failure is logged; none is reported as a failed import.
-    private func finish(item: MediaItem, bytes: Data, device: DeviceAsset?) async {
-        if device?.isFavorite == true, FeatureFlags.favorites {
-            // Optimistic and fire-and-forget, exactly as the star in the viewer is.
-            library.setStarred(id: item.id, isStarred: true)
-        }
-
-        var liveVideoFileID: String?
-        if device?.isLivePhoto == true, settings.importsLivePhotoMotion, let device {
-            liveVideoFileID = await uploadLiveMotion(for: item.fileID, device: device)
-        }
-
-        // Off the main actor: this is ImageIO parsing headers, which is fast but is not free and
-        // has no business on the thread drawing the import progress bar.
-        let extracted = await Task.detached(priority: .userInitiated) {
-            MediaMetadataExtractor.metadata(from: bytes)
-        }.value
-        guard let metadata = MediaMetadataExtractor.merged(extracted, with: device,
-                                                            liveVideoFileID: liveVideoFileID) else {
-            return
-        }
-        await library.setMetadata(metadata, forPhoto: item.id,
-                                  publishingLocation: settings.publishesLocationMetadata)
-    }
-
-    /// Sends a Live Photo's paired video up beside the still it belongs to.
-    ///
-    /// Answers the video's Drive file id, which is what ties the two together — it travels in the
-    /// photo record's metadata, so any device that lists the library learns about the motion without
-    /// having to go looking for it in Drive.
-    private func uploadLiveMotion(for fileID: String, device: DeviceAsset) async -> String? {
-        guard let deviceLibrary else { return nil }
-        do {
-            guard let url = try await deviceLibrary.writePairedVideo(
-                for: device.localIdentifier) else { return nil }
-            defer { try? FileManager.default.removeItem(at: url) }
-            return try await content.uploadLivePhotoVideo(forOriginal: fileID, from: url)
-        } catch {
-            logger.error("live photo motion failed for \(fileID, privacy: .public): \(error, privacy: .public)")
-            return nil
         }
     }
 
@@ -374,30 +295,12 @@ final class PhotoImportService: ObservableObject {
                                              fallbackDate: device?.creationDate ?? Date())
             currentName = name
 
-            let url = movie.url
-            let fingerprint = try await Task.detached(priority: .userInitiated) {
-                try Self.fingerprint(ofFileAt: url)
-            }.value
-            guard !fingerprints.contains(fingerprint) else {
-                skipped += 1
-                logger.debug("skipped a duplicate video: \(name, privacy: .public)")
-                return
-            }
-
-            let fileID = try await content.upload(
-                fileURL: movie.url, fileName: name,
-                mimeType: type?.preferredMIMEType ?? "video/quicktime",
-                thumbnailBase64: nil,
+            let outcome = try await pipeline.importVideo(
+                at: movie.url, fileName: name,
+                mimeType: type?.preferredMIMEType ?? "video/quicktime", device: device,
                 onProgress: { [weak self] fraction in self?.currentFraction = fraction }
             )
-            // A video carries no EXIF this app reads, so the asset's date is the *only* capture date
-            // it will ever have — without library access every video in the library sorts under its
-            // upload time.
-            let item = try await library.register(fileID: fileID, captureDate: device?.creationDate)
-            fingerprints.insert(fingerprint)
-            logger.debug("imported \(name, privacy: .public) as \(fileID, privacy: .public)")
-
-            await finishVideo(item: item, device: device)
+            if outcome.wasDuplicate { skipped += 1 }
         } catch is CancellationError {
             logger.debug("import cancelled")
         } catch {
@@ -406,56 +309,18 @@ final class PhotoImportService: ObservableObject {
         }
     }
 
-    /// The video counterpart to ``finish(item:bytes:device:)``.
-    ///
-    /// Shorter because there are no bytes to read: nothing in this app parses a video container, so
-    /// everything a clip's record knows comes from the asset — its dimensions, its favourite flag,
-    /// where it was shot, and whether it is a slow-motion or a time-lapse. That last pair is stored
-    /// rather than acted on; Epic 8 is what plays them back at the right speed.
-    private func finishVideo(item: MediaItem, device: DeviceAsset?) async {
-        guard let device else { return }
-        if device.isFavorite, FeatureFlags.favorites {
-            library.setStarred(id: item.id, isStarred: true)
-        }
-        guard let metadata = MediaMetadataExtractor.merged(nil, with: device) else { return }
-        await library.setMetadata(metadata, forPhoto: item.id,
-                                  publishingLocation: settings.publishesLocationMetadata)
-    }
+    // MARK: - Import history
 
-    // MARK: - Fingerprints
+    /// The shared record of what this device has uploaded. Exposed so Settings can explain it and
+    /// the full-library importer can consult the same one — see ``ImportLedger``.
+    var ledger: ImportLedger { pipeline.ledger }
 
-    nonisolated private static func fingerprint(of data: Data) -> String {
-        SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
-    }
-
-    /// The same hash, computed a block at a time — a video cannot be read into memory to be
-    /// fingerprinted any more than it can be to be encrypted.
-    ///
-    /// `nonisolated` so it can be called off the main actor, which is where hashing half a gigabyte
-    /// belongs. `importMovie` awaits it on a detached task for that reason.
-    nonisolated static func fingerprint(ofFileAt url: URL) throws -> String {
-        let handle = try FileHandle(forReadingFrom: url)
-        defer { try? handle.close() }
-        var hasher = SHA256()
-        while let block = try handle.read(upToCount: 1 << 20), !block.isEmpty {
-            hasher.update(data: block)
-        }
-        return hasher.finalize().map { String(format: "%02x", $0) }.joined()
-    }
-
-    private func persistFingerprints() {
-        defaults.set(Array(fingerprints), forKey: Self.fingerprintsKey)
-    }
-
-    /// Forgets what has been imported, so the same photographs can be uploaded again. Offered in
-    /// Settings beside the duplicate explanation, because the record is a convenience rather than
-    /// a constraint the user should be stuck with.
+    /// Forgets what has been imported, so the same photographs can be uploaded again.
     func forgetImportHistory() {
-        fingerprints = []
-        defaults.removeObject(forKey: Self.fingerprintsKey)
+        Task { await pipeline.ledger.forget() }
     }
 
-    var importedCount: Int { fingerprints.count }
+    var importedCount: Int { pipeline.ledger.count }
 }
 
 // MARK: - PickedMovie
