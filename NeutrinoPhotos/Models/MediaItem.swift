@@ -52,6 +52,13 @@ struct MediaItem: Identifiable, Hashable {
     let captureDate: Date?
     let createdAt: Date
     var updatedAt: Date
+    /// When the item was moved to Recently Deleted, or nil while it is live.
+    ///
+    /// `var` because a restore clears it and a delete sets it, and both happen optimistically on the
+    /// device before the server has answered — see ``PhotoLibraryService``. It is what
+    /// ``TrashRetention`` counts from, so an item whose server copy predates this field simply shows
+    /// no countdown rather than a wrong one.
+    var deletedAt: Date?
     /// Dimensions, EXIF, and what the device library knew — see ``MediaMetadata``. `var` because
     /// this app writes it: an end-to-end encrypted upload is one the server cannot read, so the
     /// importing device is the only thing that can extract it, and it attaches it to the record it
@@ -112,7 +119,8 @@ struct MediaItem: Identifiable, Hashable {
     init(id: String, fileID: String, fileName: String, mimeType: String, sizeBytes: Int64,
          thumbnailBase64: String? = nil, thumbnailMIMEType: String? = nil,
          isStarred: Bool = false, isArchived: Bool = false, captureDate: Date? = nil,
-         createdAt: Date, updatedAt: Date, metadata: MediaMetadata? = nil) {
+         createdAt: Date, updatedAt: Date, deletedAt: Date? = nil,
+         metadata: MediaMetadata? = nil) {
         self.id = id
         self.fileID = fileID
         self.fileName = fileName
@@ -125,7 +133,60 @@ struct MediaItem: Identifiable, Hashable {
         self.captureDate = captureDate
         self.createdAt = createdAt
         self.updatedAt = updatedAt
+        self.deletedAt = deletedAt
         self.metadata = metadata
+    }
+}
+
+// MARK: - TrashRetention
+
+/// How long a deleted item stays in Recently Deleted before it is gone.
+///
+/// One type rather than a `30` written into each of the four places that mention it — the bulk
+/// delete confirmation, the viewer's delete, the trash view's countdown, and the empty-trash
+/// warning — because a promise the app makes in four voices is one that eventually disagrees with
+/// itself.
+///
+/// **This number is half of a pair.** The server sweeps expired trash on the same window —
+/// `PhotosService::TRASH_RETENTION_DAYS` in the `neutrino` repository, run hourly from `main` — and
+/// that sweep is what makes the countdown a fact rather than a statement of policy. The two
+/// constants are not shared by any mechanism, so changing one without the other makes the app count
+/// down to a moment nothing happens at, or purge photographs it promised to keep. Change both.
+enum TrashRetention {
+
+    /// The window the app promises, in days. Must match the server's `TRASH_RETENTION_DAYS`.
+    static let days = 30
+
+    /// Days left before `item` is due to be purged, or nil when it is not in the trash or arrived
+    /// from a server too old to say when it was deleted.
+    ///
+    /// Clamped at zero rather than going negative: "0 days left" is a thing to show a user and
+    /// "-3 days left" is a bug report.
+    static func daysRemaining(for item: MediaItem,
+                              now: Date = Date(),
+                              calendar: Calendar = .current) -> Int? {
+        guard let deletedAt = item.deletedAt else { return nil }
+        guard let due = calendar.date(byAdding: .day, value: days, to: deletedAt) else { return nil }
+        // Counted between the *start of each day* rather than between the two instants, so an item
+        // deleted at 11pm does not report a day fewer than one deleted the same morning.
+        let from = calendar.startOfDay(for: now)
+        let to = calendar.startOfDay(for: due)
+        let remaining = calendar.dateComponents([.day], from: from, to: to).day ?? 0
+        return max(0, remaining)
+    }
+
+    /// "29 days left", "1 day left", "Deleting soon" — what a trashed cell captions itself with.
+    static func caption(for item: MediaItem,
+                        now: Date = Date(),
+                        calendar: Calendar = .current) -> String? {
+        guard let remaining = daysRemaining(for: item, now: now, calendar: calendar) else {
+            return nil
+        }
+        switch remaining {
+        case 0:  return "Deleting soon"
+        case 1:  return "1 day left"
+        default: return "\(remaining) days left"
+        }
     }
 }
 
@@ -326,7 +387,7 @@ extension MediaItem: Decodable {
     /// the wire names and no key strategy is applied — see `PhotoLibraryService.decoder`.
     private enum CodingKeys: String, CodingKey {
         case id, fileId, fileName, mimeType, sizeBytes, thumbnail, thumbnailMimeType
-        case isStarred, isArchived, captureDate, createdAt, updatedAt, metadata
+        case isStarred, isArchived, captureDate, createdAt, updatedAt, deletedAt, metadata
     }
 
     init(from decoder: Decoder) throws {
@@ -343,6 +404,7 @@ extension MediaItem: Decodable {
         captureDate = try container.decodeIfPresent(Date.self, forKey: .captureDate)
         createdAt = try container.decode(Date.self, forKey: .createdAt)
         updatedAt = try container.decode(Date.self, forKey: .updatedAt)
+        deletedAt = try container.decodeIfPresent(Date.self, forKey: .deletedAt)
         metadata = try container.decodeIfPresent(MediaMetadata.self, forKey: .metadata)
     }
 }

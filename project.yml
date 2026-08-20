@@ -24,7 +24,7 @@ targets:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.neutrino.photos
         MARKETING_VERSION: "1.0.0"
-        CURRENT_PROJECT_VERSION: "1"
+        CURRENT_PROJECT_VERSION: "4"
         SWIFT_VERSION: "5.0"
         IPHONEOS_DEPLOYMENT_TARGET: "16.0"
         DEVELOPMENT_TEAM: "46KWJJ63FU"
@@ -93,6 +93,11 @@ targets:
         PHPhotoLibraryPreventAutomaticLimitedAccessAlert: true
         NSAppTransportSecurity:
           NSAllowsArbitraryLoads: true
+        # Required alongside CFBundleDocumentTypes or App Store Connect rejects the upload with
+        # ITMS-90737. False, not true: a key file is read once and its contents copied into the
+        # keychain — the app never edits the document, so it has no use for in-place access to the
+        # user's original file.
+        LSSupportsOpeningDocumentsInPlace: false
         CFBundleDocumentTypes:
           - CFBundleTypeName: Neutrino Photos Key File
             CFBundleTypeRole: Viewer

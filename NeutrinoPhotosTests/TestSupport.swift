@@ -173,12 +173,14 @@ enum Fixture {
                      isArchived: Bool = false,
                      captureDate: Date? = Date(timeIntervalSince1970: 1_700_000_000),
                      createdAt: Date = Date(timeIntervalSince1970: 1_700_100_000),
+                     deletedAt: Date? = nil,
                      metadata: MediaMetadata? = nil) -> MediaItem {
         MediaItem(id: id, fileID: fileID, fileName: fileName, mimeType: mimeType,
                   sizeBytes: sizeBytes, thumbnailBase64: thumbnailBase64,
                   thumbnailMIMEType: thumbnailBase64 == nil ? nil : "image/jpeg",
                   isStarred: isStarred, isArchived: isArchived, captureDate: captureDate,
-                  createdAt: createdAt, updatedAt: createdAt, metadata: metadata)
+                  createdAt: createdAt, updatedAt: createdAt, deletedAt: deletedAt,
+                  metadata: metadata)
     }
 
     /// The RFC 3339 shape the Photos endpoints emit (`chrono`'s `to_rfc3339()`).
@@ -200,16 +202,19 @@ enum Fixture {
                           isStarred: Bool = false,
                           isArchived: Bool = false,
                           captureDate: Date? = Date(timeIntervalSince1970: 1_700_000_000),
-                          createdAt: Date = Date(timeIntervalSince1970: 1_700_100_000)) -> String {
+                          createdAt: Date = Date(timeIntervalSince1970: 1_700_100_000),
+                          deletedAt: Date? = nil) -> String {
         let thumbnailField = thumbnail.map { "\"\($0)\"" } ?? "null"
         let thumbnailMIME = thumbnail == nil ? "null" : "\"image/jpeg\""
         let capture = captureDate.map { "\"\(rfc3339($0))\"" } ?? "null"
+        let deleted = deletedAt.map { "\"\(rfc3339($0))\"" } ?? "null"
         return """
         {"id":"\(id)","fileId":"\(fileID)","fileName":"\(fileName)","mimeType":"\(mimeType)",
          "sizeBytes":\(sizeBytes),"contentUrl":"/api/v1/drive/files/\(fileID)",
          "thumbnail":\(thumbnailField),"thumbnailMimeType":\(thumbnailMIME),
          "isStarred":\(isStarred),"isArchived":\(isArchived),"captureDate":\(capture),
-         "createdAt":"\(rfc3339(createdAt))","updatedAt":"\(rfc3339(createdAt))","metadata":null}
+         "createdAt":"\(rfc3339(createdAt))","updatedAt":"\(rfc3339(createdAt))",
+         "deletedAt":\(deleted),"metadata":null}
         """
     }
 
@@ -224,11 +229,13 @@ enum Fixture {
                           title: String = "Trip",
                           isAuto: Bool = false,
                           photoCount: Int = 0,
+                          coverPhotoID: String? = nil,
                           createdAt: Date = Date(timeIntervalSince1970: 1_700_100_000)) -> String {
-        """
+        let cover = coverPhotoID.map { "\"\($0)\"" } ?? "null"
+        return """
         {"id":"\(id)","title":"\(title)","description":null,"isAuto":\(isAuto),"personId":null,
-         "photoCount":\(photoCount),"createdAt":"\(rfc3339(createdAt))",
-         "updatedAt":"\(rfc3339(createdAt))"}
+         "photoCount":\(photoCount),"coverPhotoId":\(cover),
+         "createdAt":"\(rfc3339(createdAt))","updatedAt":"\(rfc3339(createdAt))"}
         """
     }
 }

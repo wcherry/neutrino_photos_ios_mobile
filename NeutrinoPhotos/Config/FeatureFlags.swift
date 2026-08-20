@@ -70,11 +70,22 @@ enum FeatureFlags {
     /// Recently Deleted: trash, restore, empty.
     static let trash: Bool = true
 
-    /// Albums: listing, creating, renaming, deleting, and adding or removing photographs.
+    /// Albums: listing, creating, renaming, deleting, opening, and adding or removing photographs.
     ///
-    /// Opening an album is deliberately absent: the server has no endpoint that lists an album's
-    /// contents — see ``Album`` — so this covers everything the API can currently do.
+    /// Opening an album became possible in Epic 9. It needed a server change — `GET
+    /// /api/v1/albums/{id}/items` did not exist, and neither this app nor the web client could show
+    /// what was in an album — so a build of this app older than that endpoint gets an empty grid
+    /// rather than an error, which is what the API answered before it existed.
     static let albums: Bool = true
+
+    /// Organization, as the roadmap's Epic 9 names it: albums with covers, Favorites, Recently
+    /// Added, Recently Deleted with its retention countdown, and the bulk actions over a selection.
+    ///
+    /// An umbrella over ``albums``, ``favorites``, ``archive``, and ``trash`` rather than a
+    /// replacement for them. The four stay because they are independently switchable and were each
+    /// shipped by an earlier epic; this one names the epic that tied them into the Albums tab and
+    /// added what none of them had — a cover grid, a way in, a countdown, and bulk add to album.
+    static let organization: Bool = true
 
     /// The media pipeline: the rendition ladder, the encrypted preview stored beside each original,
     /// the size-capped caches of decrypted media on disk, and the SQLite library the timeline paints

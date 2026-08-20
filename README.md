@@ -39,8 +39,9 @@ its own Settings > Encryption page, chosen in the app or simply tapped in Files.
 | Photo library | Optional `PHPhotoLibrary` access: real capture dates, favorites, coordinates, Live Photo motion, RAW originals, save back to the device | COMPLETE |
 | Metadata | Dimensions, camera, lens, exposure, coordinates — extracted on device and published, with location held back by default | COMPLETE |
 | Media pipeline | Rendition ladder, encrypted preview beside each original, capped and evicted caches of decrypted media, SQLite library index | COMPLETE |
-| Favorites / Archive / Trash | Star, archive, delete, restore, empty | COMPLETE |
-| Albums | List, create, rename, delete, add a photo | PARTIAL — see below |
+| Favorites / Archive / Trash | Star, archive, delete, restore, empty, permanent delete, 30-day retention countdown | COMPLETE |
+| Albums | List, create, rename, delete, open, add and remove photos, cover art, bulk add from a selection | COMPLETE |
+| Recently Added | What reached the library lately, ordered by arrival rather than capture date | COMPLETE |
 | Settings | Account, grouping, appearance, Wi-Fi-only uploads, storage breakdown, cache, device name, roadmap | COMPLETE |
 
 The shell is four tabs — Library, Albums, Search, Settings — and keeps that shape in every build.
@@ -70,7 +71,7 @@ NeutrinoPhotosApp        composition root — every service constructed once, in
 ├── DeviceSessionService /api/v1/auth/sessions — the account's devices
 ├── PhotoLibraryService  /api/v1/photos — the library, favorites, archive, trash, registration
 ├── PhotosDriveService   /api/v1/drive — the type=photo listing, quota, the renditions folder
-├── AlbumService         /api/v1/albums
+├── AlbumService         /api/v1/albums — list, create, rename, delete, contents, membership
 ├── MediaContentService  download + decrypt an original; encrypt + upload a new one
 │   ├── MediaCrypto      the primitives: one-shot and streaming, DEK sealing, metadata
 │   ├── MediaRendition   the ladder — thumbnail, preview, original — and how each is made
@@ -364,12 +365,6 @@ What this is *not* is background upload: the run needs the app in the foreground
 Uploading with the app closed needs a background `URLSession` and is `FeatureFlags.automaticBackup`.
 
 ## Known Gaps
-
-**Albums cannot be opened.** The server has `GET /api/v1/albums` and `GET /api/v1/albums/{id}`, but
-neither returns the album's items and there is no `/items` listing. So this app lists albums,
-creates, renames, and deletes them, and adds photographs to them from the viewer — and says on the
-screen why a card does not open. `AlbumService.photos(in:)` is the one place that changes when the
-endpoint lands, and a test asserts the gap so it fails the day it closes.
 
 **Passkey unlock is written but unproven.** `PasskeyPRFAuthenticator` performs the WebAuthn PRF
 assertion on iOS 18+, and `webcredentials:` is in the entitlement. iOS still will not hand this app a

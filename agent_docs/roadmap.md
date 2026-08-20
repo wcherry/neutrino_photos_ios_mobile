@@ -126,6 +126,14 @@ the sync cursor and conflict rule (Epic 10), the background task architecture (E
 error/retry policy (Epic 7). `FeatureFlags.offlineMode` and `FeatureFlags.automaticBackup` are
 `false` for exactly that reason.
 
+**Two of those four are less open than they look.** The background task architecture and the
+backoff curve are both answered in the Neutrino Drive app — `BackgroundTransferService` and
+`PhotoSyncService`, described in its `agent_docs/plans/feature-photo-auto-sync.md` — against a
+real device rather than on paper. Epic 7 ports them; `architecture.md` should record the decision
+by reference rather than re-deriving it. What Drive does *not* answer is how a **multi-step**
+import (upload → register → renditions → metadata) resumes at a step boundary after a suspension,
+since Drive's upload is a single POST. That one is genuinely this app's to decide.
+
 **Amended after Epic 6.** Half of the error/retry policy now exists as working code rather than as
 prose, and the half that exists is the poison-item half: `LibraryImportService` retries a failed
 item up to `maximumAttempts` across *passes* over the queue rather than in place, so one item can
@@ -702,15 +710,87 @@ exactly what the user picked in the picker.
 
 Covers mvp.md §3 Automatic Backup, §19 items 5, 6.
 
-**Deliverables**
+### This epic is a port, not a design
 
-- [ ] `PHPhotoLibraryChangeObserver` → new items auto-queue
-- [ ] `URLSession` background configuration for uploads that outlive the app
-- [ ] `BGProcessingTask` registration for scheduled catch-up
-- [ ] Conditions: Wi-Fi only, cellular allowed, charging only, low-power respect
-- [ ] Upload queue UI: pending, in-flight, failed, with per-item status and retry
-- [ ] Backup status surface: "All photos backed up" / "12 remaining"
-- [ ] Backup history
+**Neutrino Drive already ships this mechanism**, and the epic was originally written as though it
+did not. See `../neutrino_drive_ios_mobile`: `PhotoSyncService`, `PhotoSyncQueue`,
+`BackgroundTransferService`, `PhotoSyncSettingsView`, and
+`agent_docs/plans/feature-photo-auto-sync.md`. `FeatureFlags.photoAutoSync` and
+`FeatureFlags.backgroundTransfers` are both `true` there.
+
+Every hard question this epic used to ask has an answer over there, arrived at against a real
+device and a real server:
+
+| Question | Drive's answer |
+|---|---|
+| Change detection | `PHPhotoLibraryChangeObserver` live, `fetchPersistentChanges(since:)` for the killed-app gap, bounded `creationDate` fetch when the token expires |
+| Transfers that outlive the app | `.background` `URLSessionConfiguration` behind a delegate, in `BackgroundTransferService` |
+| Scheduled catch-up | `BGProcessingTask`, rescheduled from inside its own handler because the system grants one run per submission |
+| Conditions | `NWPathMonitor` for Wi-Fi (resume on the callback, never poll), `batteryState` for charging, `isLowPowerModeEnabled` pausing background drains only |
+| Retry | 30s → 2m → 10m → 1h → 6h, then a user-visible failed list; 4xx other than 408/429 is permanent immediately |
+
+**Treat that as the specification.** This is the same relationship the roadmap already has with the
+Notes app for `AuthService`, `KeyVaultService`, and `SyncEngine` — a port, with the design settled
+elsewhere. Reading the Drive plan's "Known risks" section first is worth more than re-deriving any
+of it.
+
+Two of Drive's limitations must **not** come across with the port, because this app already does
+better and regressing would be silent:
+
+- Drive uploads Live Photos as **stills only**, dropping the paired video. Epic 5 pairs them, and
+  `MediaImportPipeline` is what must stay on the path.
+- Drive buffers plaintext + ciphertext + the assembled multipart body in memory, and carries a
+  512 MB cap because of it. Epic 3's `MediaCrypto.encryptStream` / `MultipartFormBody.write` are
+  memory-bounded, so this app needs no cap. Do not port one in.
+
+### What is actually left to build
+
+Epic 6 already shipped the durable queue (`import_queue`, `LocalStore` schema v2), the two-key
+`ImportLedger`, the retry ladder, and the byte-based progress. What remains is the part that is
+this app's and cannot be lifted from anywhere:
+
+- [ ] `PHPhotoLibraryChangeObserver` enqueueing into **Epic 6's `import_queue`**, not a queue of
+      its own. A second queue is a second ledger, and a second ledger is the duplicate upload
+      Epic 6's `ImportLedger` exists to prevent.
+- [ ] Background `URLSession` carrying `MediaImportPipeline`, which is a **multi-step** import —
+      upload, register, rendition upload, metadata `PUT` — where Drive's is a single blob POST plus
+      a key `PUT`. The step boundaries are where a suspension lands, so the pipeline has to be
+      resumable at each one rather than only at item granularity. This is the only genuinely new
+      engineering in the epic.
+- [ ] `BGProcessingTask` under this app's own identifier (`com.neutrino.photos.backup` — two apps
+      cannot share one), plus the conditions and the `NWPathMonitor` wiring ported from Drive.
+- [ ] Backup status surface: "All photos backed up" / "12 remaining". Epic 6's `LibraryImportView`
+      is most of the UI already; this is the always-on summary, not a second screen.
+- [ ] Backup history — the one deliverable Drive has no answer for.
+- [ ] Error/retry policy generalised beyond the import queue, closing the Epic 0 deliverable that
+      is still open. Drive's backoff curve is the starting point.
+
+### Unresolved: two apps backing up one camera roll
+
+**This is a decision, and it is not made.** With both apps installed and backup enabled in each,
+every new photo uploads **twice** against the same quota — once as a Drive file in `iPhone Photos`,
+once as a registered photo record. Neither app can see the other's ledger; they are separate
+sandboxes, and Drive's queue lives in its own Application Support container. The user also answers
+two `PHPhotoLibrary` prompts for one job.
+
+The two are not redundant copies of each other, which is what makes the choice real rather than
+obvious: Drive's files sit outside the root-scoped `type=photo` listing, so they never appear in
+this app's timeline, never get renditions, never get their EXIF published, and never land in an
+album. A user who backed up through Drive and then installs Neutrino Photos opens it to an empty
+library.
+
+The options, none of them free:
+
+1. **Retire `photoAutoSync` in Drive when this epic ships**, and migrate — adopt the existing
+   `iPhone Photos` folder's files as photo records rather than re-uploading bytes the user already
+   paid for. Cleanest result; it is a feature removal in a shipped app.
+2. **Coexist with mutual detection** via an App Group or a Keychain access group, so whichever app
+   is installed second defers. More engineering, and when detection breaks the failure is silent
+   double-billing.
+3. **Accept the overlap** and document it.
+
+**Resolve this before writing code, not after** — option 1 implies a migration path that options 2
+and 3 do not, and it is far cheaper to build than to retrofit.
 
 **Flag:** `autoBackup`
 
@@ -732,6 +812,15 @@ Covers mvp.md §3 Automatic Backup, §19 items 5, 6.
 8. Corrupt one queued item deliberately → it lands in "failed" with an explanation, and the
    rest of the queue keeps draining. A single poison item must not stall the queue.
 9. Leave the device overnight with 500 items queued → all uploaded by morning.
+10. Kill the app between the blob upload and the metadata `PUT` (the pipeline's step boundary) →
+    on relaunch the item completes its remaining steps rather than re-uploading from the top.
+    This is the step the multi-step pipeline exists to survive, and the one Drive's single-POST
+    design never had to answer.
+11. **Take a Live Photo with backup on** → it arrives paired, not as a still. The regression this
+    catches is the Drive port bringing Drive's stills-only behaviour across with it.
+12. **With Neutrino Drive installed and its Photo Sync also on**, take one photo → confirm what
+    actually happens matches whichever option was chosen above. If it uploads twice, that is the
+    unresolved decision showing up as a bill, not a bug to fix here.
 
 ---
 
@@ -776,16 +865,84 @@ Covers mvp.md §19 items 11, §4 (transcoding/streaming subset).
 
 Covers mvp.md §7 Manual Albums, §19 items 9, 10, 17.
 
+### This epic needed the server, and that is the headline
+
+Most of this epic's surface already existed — Epics 3–6 shipped favorites, archive, trash, restore,
+empty, and album create/rename/delete/add/remove. **Three things were not missing from the app, they
+were missing from the API**, and no amount of client work could have produced them:
+
+| Gap | What it blocked |
+|---|---|
+| No `GET /api/v1/albums/{id}/items` | Opening an album at all. `album_photos` held the memberships and nothing read them, so neither this app nor the web client could show an album's contents — the count was the only thing an album could say about itself. |
+| `PhotoResponse` carried no `deletedAt` | "30-day retention" and "days remaining". |
+| No permanent delete, and `empty_trash` dropped only the rows | Verification step 7's "verify they're gone from Drive too" — the bytes stayed on the user's quota with nothing left pointing at them. |
+
+All three are now implemented in the `neutrino` repository. See the Status section for the full list
+and for the two pre-existing bugs found on the way.
+
 **Deliverables**
 
-- [ ] Create / rename / delete album; add / remove photos; album cover
-- [ ] Albums tab with cover grid and item counts
-- [ ] Favorite toggle in viewer and in multi-select; Favorites view
-- [ ] Soft delete → Recently Deleted, 30-day retention, restore, delete permanently
-- [ ] Recently Added view
-- [ ] Bulk actions on multi-select: add to album, favorite, delete
+- [x] Create / rename / delete album; add / remove photos; album cover
+      — the first five already existed. The cover is new and is an **id, not an image**:
+      `AlbumResponse.coverPhotoId` names the most recently added live photograph and the app resolves
+      it against the library it already holds, so a cover costs no bytes and no extra request. Sending
+      one base64 thumbnail per album would put a picture in every row of a mostly-text list.
+- [x] Albums tab with cover grid and item counts
+      — `AlbumsView` is now a `LazyVGrid` of cover cards over a list of collections, and the two are
+      different shapes on purpose: collections are a fixed, short, *named* set a user scans for the
+      word "Favorites", while albums are remembered by what is in them rather than what they are
+      called. Cards open into the new `AlbumDetailView`.
+- [x] Favorite toggle in viewer and in multi-select; Favorites view
+      — all three already shipped (Epics 3–4). Unchanged.
+- [x] Soft delete → Recently Deleted, 30-day retention, restore, delete permanently
+      — the retention half is what was missing. `TrashRetention` counts down from `deletedAt`, and
+      **the countdown is now a fact rather than a policy**: `PhotosService::purge_expired_trash`
+      sweeps hourly from `main`. Before this the trash was kept forever and "kept for 30 days" was a
+      sentence no code made true. Permanent delete arrives as `DELETE /photos/{id}/permanent`, which
+      refuses a live photograph — the two-step path through the trash is the whole point of having
+      one, and the app refuses to short-circuit it too.
+- [x] Recently Added view
+      — a fourth `MediaCollectionView.Collection`, ordered and filtered by `createdAt` rather than
+      `timelineDate`. That distinction *is* the feature: a shoebox of 1998 photographs scanned today
+      is recently added and is nowhere near the top of the timeline.
+- [x] Bulk actions on multi-select: add to album, favorite, delete
+      — favorite/archive/delete already existed; **add to album** was the one Epic 4 left absent
+      rather than stubbed. `AlbumService.add(photoIDs:to:)` is serial (the endpoint takes one photo
+      per call) and one refusal does not stop the rest, so 499 land when one is gone. The count is
+      bumped once from what actually succeeded, so a partial run leaves an honest number on the card.
 
-**Flag:** `organization`
+**Flag:** `organization` — added and `true`. An umbrella over the existing `albums`, `favorites`,
+`archive`, and `trash` rather than a replacement: those four stay because each is independently
+switchable and each was shipped by an earlier epic, and this one names what tied them into the
+Albums tab and added what none of them had.
+
+**Status (2026-08-20):** all six deliverables are implemented. **389 iOS unit tests pass** (up from
+362) and **304 backend tests pass** (up from 294). Four things are worth knowing:
+
+- **The server changed, and that was the epic.** In `neutrino`: `GET /albums/{id}/items`;
+  `coverPhotoId` on `AlbumResponse`; `deletedAt` on `PhotoResponse`; `DELETE /photos/{id}/permanent`;
+  `DriveClient::delete_file_permanently`; and the hourly trash purge in `main`. The web client's
+  hand-written types in `web/packages/api-photos` were updated to match, but **no web UI was
+  written** — the web app still cannot open an album, and now only because nobody has built the
+  screen rather than because the API cannot answer.
+- **Two pre-existing bugs turned up on the way, both now fixed.** First, an album's `photoCount`
+  counted *trashed* photographs, so verification step 8 would have shown "3 photos" over a grid of 2
+  — the count, the cover, and the contents now come from one query (`list_live_album_photo_ids`) so
+  the three cannot disagree. Second, `album_photos` has **no foreign key** onto `photos`, so every
+  permanent-delete path left memberships pointing at photographs that no longer existed; all three
+  paths now clear them in the same transaction.
+- **`delete_file` was the wrong call and the live test is what caught it.** It *trashes* a Drive
+  file rather than deleting it, so the first implementation of permanent delete freed nothing — the
+  unit tests passed and `GET` on the file still returned 200. `delete_file_permanently` was added to
+  `DriveClient` and verified against a running server: the row goes, the blob leaves the disk, and
+  the file 404s. This is exactly the failure mode step 7 exists to catch.
+- **Verified against a real server, not only in unit tests.** The whole Epic 9 loop — create album,
+  add three photographs, list contents, cover ordering, remove-from-album leaving the photo in the
+  library, trashing dropping it from the album while the count follows, restore putting it back in
+  the album it was in, permanent delete freeing the bytes — was exercised end to end against the
+  built binary on a **copy** of the database. What that does *not* cover is every manual step below:
+  they need the test library on a physical device, and steps 1, 4, 6, and 9 are UI behaviour no curl
+  can see. **M4 is not closed by this epic**; Epic 10 remains, as do these steps.
 
 **Manual verification**
 
@@ -797,9 +954,18 @@ Covers mvp.md §7 Manual Albums, §19 items 9, 10, 17.
 5. Delete 10 photos → gone from timeline, present in Recently Deleted with days remaining.
 6. Restore 5 → back in the timeline, in their original date positions (not at the top).
 7. Delete permanently → gone from Recently Deleted; verify they're gone from Drive too.
+   *Checked against a running server: the `files` row is deleted, the blob leaves the disk, and a
+   `GET` on the Drive file 404s. Worth repeating on a device against the real deployment, since it
+   is the step whose first implementation silently freed nothing.*
 8. Add one photo to three albums → appears in all three; delete it → gone from all three
    and in Recently Deleted once, not three times.
 9. Add 500 photos to an album at once → completes without freezing the UI.
+   *The one step most likely to fail. The add is serial by necessity — one HTTP call per photo — so
+   500 items is 500 round trips, and the progress bar in `AlbumPickerView` exists because of it. If
+   this is too slow to live with, the fix is a bulk endpoint on the server, not concurrency here.*
+10. **With the trash purge running:** trash a photo, set its `deleted_at` back beyond the retention
+    window in the database, and confirm the hourly sweep removes it *and* its Drive file. This is
+    the step that proves the countdown means something; nothing before this epic swept anything.
 
 ---
 

@@ -13,6 +13,8 @@ struct LibraryView: View {
 
     @EnvironmentObject private var library: PhotoLibraryService
     @EnvironmentObject private var settings: AppSettings
+    /// Held for the bulk "Add to Album" action and handed on to its sheet.
+    @EnvironmentObject private var albums: AlbumService
     @EnvironmentObject private var importer: PhotoImportService
     @EnvironmentObject private var libraryImporter: LibraryImportService
     @EnvironmentObject private var vault: KeyVaultService
@@ -40,6 +42,19 @@ struct LibraryView: View {
 
     @State private var selection = TimelineSelection()
     @State private var showsBulkDeleteConfirmation = false
+    /// The selection being filed into an album. Captured at the moment the sheet opens rather than
+    /// read live, so a library refresh mid-sheet cannot change what is being added under it.
+    @State private var addingToAlbum: AlbumTarget?
+
+    /// A selection on its way into an album.
+    ///
+    /// A wrapper with an identity of its own because `sheet(item:)` needs `Identifiable` and an
+    /// array is not — and because identifying the sheet by its *contents* would tear it down and
+    /// rebuild it if the selection changed underneath, mid-add.
+    private struct AlbumTarget: Identifiable {
+        let id = UUID()
+        let items: [MediaItem]
+    }
 
     /// The grid's width, which is what decides how many columns fit. Measured rather than assumed
     /// so an iPad and a Split View pane get a grid built for them instead of a stretched phone.
@@ -123,11 +138,17 @@ struct LibraryView: View {
                     }
             }
         }
+        .sheet(item: $addingToAlbum) { target in
+            // Selection mode ends only on a *successful* add. Cancelling, or an add that partly
+            // failed, leaves the selection exactly as it was so the user can retry it.
+            AlbumPickerView(items: target.items) { selection.end() }
+                .environmentObject(albums)
+        }
         .confirmationDialog("Delete \(selection.count) item(s)?",
                             isPresented: $showsBulkDeleteConfirmation, titleVisibility: .visible) {
             Button("Delete", role: .destructive) { deleteSelection() }
         } message: {
-            Text("They move to Recently Deleted and can be restored for 30 days.")
+            Text("They move to Recently Deleted and can be restored for \(TrashRetention.days) days.")
         }
     }
 
@@ -295,9 +316,9 @@ struct LibraryView: View {
 
     /// The actions that apply to a selection.
     ///
-    /// Favourite, archive, and delete only — the three the library service can already do to many
-    /// items, and each is the same call the context menu makes, run in a loop. Adding a selection
-    /// to an album is Epic 9's, and is absent rather than stubbed.
+    /// Favourite, add to album, archive, delete. The three that go through ``PhotoLibraryService``
+    /// are the same call the context menu makes, run in a loop; "Add to Album" is the one that
+    /// needs a destination, so it opens the picker rather than acting immediately.
     @ViewBuilder
     private var selectionBar: some View {
         if selection.isActive {
@@ -305,6 +326,11 @@ struct LibraryView: View {
                 if FeatureFlags.favorites {
                     action("Favorite", systemImage: allSelectedAreStarred ? "heart.fill" : "heart",
                            perform: toggleStarOnSelection)
+                }
+                if FeatureFlags.albums {
+                    action("Add To", systemImage: "rectangle.stack.badge.plus") {
+                        addingToAlbum = AlbumTarget(items: selectedItems)
+                    }
                 }
                 if FeatureFlags.archive {
                     action("Archive",

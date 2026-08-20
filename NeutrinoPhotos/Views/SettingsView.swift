@@ -290,6 +290,7 @@ private struct RoadmapView: View {
         ("Local cache and library index", FeatureFlags.mediaPipeline),
         ("Photo library integration", FeatureFlags.deviceLibraryAccess),
         ("Full-library import", FeatureFlags.fullLibraryImport),
+        ("Albums, favorites and trash", FeatureFlags.organization),
         ("Automatic backup", FeatureFlags.automaticBackup),
         ("Offline browsing", FeatureFlags.offlineMode),
         ("Search", FeatureFlags.search),

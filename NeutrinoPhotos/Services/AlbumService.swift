@@ -5,10 +5,18 @@ import os.log
 
 /// Albums, from `/api/v1/albums`.
 ///
-/// Everything the server offers is here — list, create, rename, delete, add a photo, remove a
-/// photo. What is *not* here is opening one: there is no endpoint that returns an album's items,
-/// only its count, so the Albums tab shows cards and adds to them rather than browsing into them.
-/// ``photos(in:)`` marks the seam where that goes.
+/// List, create, rename, delete, open, add photographs, remove them. Opening an album was the one
+/// thing missing until Epic 9 — the server had `album_photos` but no route that read it — and
+/// ``photos(in:)`` now goes through `GET /api/v1/albums/{id}/items`, which returns full photo
+/// records so an album's grid draws from the same ``MediaItem`` the timeline does.
+///
+/// ## What is optimistic and what is not
+///
+/// Renaming and deleting an album change ``albums`` before the server answers and roll back if it
+/// refuses: they are instant, reversible, and the user is looking straight at the thing that
+/// changed. Adding and removing a photograph do **not** — an album's count is the only number its
+/// card shows, and watching it climb for an add the server then rejected is the one visible lie on
+/// the screen. Those two `throw` instead, and their callers report it.
 @MainActor
 final class AlbumService: ObservableObject {
 
@@ -106,39 +114,119 @@ final class AlbumService: ObservableObject {
 
     /// Adds one photograph to an album.
     ///
-    /// The count is bumped locally on success rather than optimistically: an album's photo count is
-    /// the only thing its card says, and showing it climb for an add the server then rejected would
-    /// be the one visible lie on the screen.
+    /// The count is bumped locally on success rather than optimistically — see the note on the type.
     func add(photoID: String, to albumID: String) async throws {
         _ = try await api.send(method: "POST", path: "/api/v1/albums/\(albumID)/items",
                                json: APIAddPhotoRequest(photoId: photoID))
-        if let index = albums.firstIndex(where: { $0.id == albumID }) {
-            albums[index].photoCount += 1
-        }
+        note(added: 1, to: albumID, cover: photoID)
         logger.debug("add succeeded: album=\(albumID, privacy: .public)")
+    }
+
+    /// Adds many photographs to one album, and reports how it went.
+    ///
+    /// Serial rather than a `TaskGroup`: the endpoint takes one photo per call, and firing five
+    /// hundred of them at once is how a bulk add turns into a rate limit or a thread explosion.
+    /// Verification step 9 puts 500 items through here, and what keeps the UI alive is not
+    /// concurrency but that this is `async` and the button that called it stays on the main actor.
+    ///
+    /// **One failure does not stop the rest.** A photograph the server refuses — deleted on another
+    /// device between the selection and the tap — is counted and skipped, so the other 499 land.
+    /// The count is bumped once at the end from what actually succeeded, so a partial run leaves an
+    /// honest number on the card rather than the number the user asked for.
+    @discardableResult
+    func add(photoIDs: [String], to albumID: String) async -> BulkAddResult {
+        var added: [String] = []
+        var failures: [String: String] = [:]
+
+        for photoID in photoIDs {
+            do {
+                _ = try await api.send(method: "POST", path: "/api/v1/albums/\(albumID)/items",
+                                       json: APIAddPhotoRequest(photoId: photoID))
+                added.append(photoID)
+            } catch {
+                failures[photoID] = error.localizedDescription
+                logger.error("bulk add failed for \(photoID, privacy: .public): \(error, privacy: .public)")
+            }
+        }
+
+        // `photoIDs` is in timeline order — newest first — so its first element is the newest thing
+        // going in, which is the cover the server will independently settle on at the next refresh.
+        note(added: added.count, to: albumID, cover: added.first)
+
+        if !failures.isEmpty {
+            error = failures.count == 1
+                ? "1 photo couldn't be added."
+                : "\(failures.count) photos couldn't be added."
+        }
+        logger.debug("bulk add: \(added.count) added, \(failures.count) failed")
+        return BulkAddResult(added: added, failures: failures)
     }
 
     func remove(photoID: String, from albumID: String) async throws {
         _ = try await api.send(method: "DELETE", path: "/api/v1/albums/\(albumID)/items/\(photoID)")
         if let index = albums.firstIndex(where: { $0.id == albumID }) {
             albums[index].photoCount = max(0, albums[index].photoCount - 1)
+            // The cover just left the album. Blanking it rather than guessing the next one keeps the
+            // card honest until the next listing says what actually replaced it — the app has no way
+            // to know which photograph is now the most recently *added*, only the most recently
+            // taken, and the two are not the same.
+            if albums[index].coverPhotoID == photoID { albums[index].coverPhotoID = nil }
         }
         logger.debug("remove succeeded: album=\(albumID, privacy: .public)")
     }
 
-    // MARK: - Not yet available
+    /// Folds a successful add back into the local album record.
+    private func note(added count: Int, to albumID: String, cover: String?) {
+        guard count > 0, let index = albums.firstIndex(where: { $0.id == albumID }) else { return }
+        albums[index].photoCount += count
+        // Only when there wasn't one: an album that already has a cover keeps it until the server
+        // says otherwise, so adding to an album does not reshuffle the tab under the user's thumb.
+        if albums[index].coverPhotoID == nil { albums[index].coverPhotoID = cover }
+    }
 
-    /// The photographs in an album.
+    // MARK: - Contents
+
+    /// The photographs in an album, most recently added first.
     ///
-    /// Always empty for now: the server has no `GET /api/v1/albums/{id}/items`. Kept as the one
-    /// place that will change when it does, rather than leaving callers to discover the gap.
-    func photos(in albumID: String) async throws -> [MediaItem] { [] }
+    /// Not cached here. An album's contents are a screen's worth of state with a natural owner —
+    /// the view showing them — and holding them in the service would mean every album ever opened
+    /// stayed in memory with its thumbnails for the rest of the launch. ``AlbumDetailView`` loads
+    /// this on appear and on pull-to-refresh.
+    ///
+    /// Trashed photographs are absent: the server filters them out of both the contents and the
+    /// count, so the two agree. They keep their membership, so restoring one puts it back in the
+    /// album it was in rather than only in the timeline.
+    func photos(in albumID: String) async throws -> [MediaItem] {
+        let response: APIListPhotosResponse =
+            try await api.get("/api/v1/albums/\(albumID)/items", decoder: decoder)
+        logger.debug("photos(in:) \(albumID, privacy: .public): \(response.photos.count) items")
+        return response.photos
+    }
+}
+
+// MARK: - BulkAddResult
+
+/// What a bulk add actually managed.
+struct BulkAddResult: Equatable {
+    /// The photo ids that made it into the album.
+    var added: [String] = []
+    /// Photo id → why it did not, for the ones that did not.
+    var failures: [String: String] = [:]
+
+    var isCompleteSuccess: Bool { failures.isEmpty }
 }
 
 // MARK: - API Models
 
 private struct APIListAlbumsResponse: Decodable {
     let albums: [Album]
+}
+
+/// The same shape `GET /api/v1/photos` returns — `/albums/{id}/items` answers with a photo listing
+/// rather than a membership listing, so an album's grid needs no second round trip to resolve ids.
+private struct APIListPhotosResponse: Decodable {
+    let photos: [MediaItem]
+    let total: Int
 }
 
 private struct APICreateAlbumRequest: Encodable {

@@ -62,6 +62,37 @@ final class MockURLProtocol: URLProtocol {
         }
     }
 
+    /// Answers successive requests with successive entries, so a test can make the *third* call
+    /// fail while the others succeed — which is how a bulk action's partial failure is exercised.
+    ///
+    /// Requests past the end of the list get the last entry, so a caller that makes one more call
+    /// than the test anticipated does not hang or 404 on an unrelated leg.
+    static func respondInSequence(_ responses: [(json: String, statusCode: Int)]) {
+        precondition(!responses.isEmpty, "respondInSequence needs at least one response")
+        let counter = SequenceCounter()
+        handler = { request in
+            let index = min(counter.next(), responses.count - 1)
+            let response = responses[index]
+            return (HTTPURLResponse(url: request.url!, statusCode: response.statusCode,
+                                    httpVersion: nil, headerFields: nil)!,
+                    Data(response.json.utf8))
+        }
+    }
+
+    /// A counter the handler closure can advance. A class because the handler is escaping and a
+    /// captured `var` would be copied rather than shared.
+    private final class SequenceCounter {
+        private let lock = NSLock()
+        private var value = 0
+        func next() -> Int {
+            lock.lock()
+            defer { lock.unlock() }
+            let current = value
+            value += 1
+            return current
+        }
+    }
+
     /// Routes by path fragment, so a test covering a multi-request flow can answer each leg.
     /// The first match wins; an unmatched request gets a 404 so the omission shows up as a test
     /// failure rather than a hang.
@@ -102,6 +133,13 @@ final class MockURLProtocol: URLProtocol {
         lock.lock()
         defer { lock.unlock() }
         return requests.count
+    }
+
+    /// The most recent request — what a single-call test asserts the path and method of.
+    static var lastRequest: URLRequest? {
+        lock.lock()
+        defer { lock.unlock() }
+        return requests.last
     }
 
     // MARK: - URLProtocol

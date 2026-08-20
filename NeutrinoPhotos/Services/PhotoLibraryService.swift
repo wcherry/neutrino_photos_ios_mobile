@@ -111,6 +111,24 @@ final class PhotoLibraryService: ObservableObject {
         allItems.filter { $0.isArchived }.sorted { $0.timelineDate > $1.timelineDate }
     }
 
+    /// What has arrived in the library lately, newest arrival first.
+    ///
+    /// Ordered and filtered by `createdAt` — when the item reached the account — rather than by
+    /// ``MediaItem/timelineDate``, and that is the whole point of the view. The timeline already
+    /// answers "what did I take recently"; this answers "what did I just import", which for a
+    /// scanned shoebox of 1998 photographs is a completely different set and the only place they
+    /// are findable without scrolling to 1998.
+    ///
+    /// Archived items are excluded: archiving is the user saying "keep this out of the way", and a
+    /// second view that shows it anyway would undo that for a month.
+    func recentlyAdded(within days: Int = 30, now: Date = Date(),
+                       calendar: Calendar = .current) -> [MediaItem] {
+        guard let cutoff = calendar.date(byAdding: .day, value: -days, to: now) else { return [] }
+        return allItems
+            .filter { !$0.isArchived && $0.createdAt >= cutoff }
+            .sorted { $0.createdAt > $1.createdAt }
+    }
+
     func item(id: String) -> MediaItem? {
         allItems.first { $0.id == id } ?? trashItems.first { $0.id == id }
     }
@@ -348,7 +366,13 @@ final class PhotoLibraryService: ObservableObject {
     /// `deleted_at` on the photo record — so a restore is a flag change rather than an undelete.
     func trash(id: String) {
         guard let index = allItems.firstIndex(where: { $0.id == id }) else { return }
-        let item = allItems.remove(at: index)
+        var item = allItems.remove(at: index)
+        // Stamped here rather than waiting for the server's copy, because `DELETE /photos/{id}`
+        // answers 204 with no body — there is nothing to read it back from. The next `loadTrash()`
+        // replaces this with the server's timestamp; until then a countdown from the moment the
+        // user tapped Delete is right to within a round trip.
+        let deletedAt = Date()
+        item.deletedAt = deletedAt
         trashItems.insert(item, at: 0)
 
         Task {
@@ -359,7 +383,9 @@ final class PhotoLibraryService: ObservableObject {
             } catch {
                 logger.error("trash failed: id=\(id, privacy: .public) \(error, privacy: .public)")
                 trashItems.removeAll { $0.id == id }
-                allItems.append(item)
+                var restored = item
+                restored.deletedAt = nil
+                allItems.append(restored)
                 self.error = error.localizedDescription
             }
         }
@@ -367,7 +393,11 @@ final class PhotoLibraryService: ObservableObject {
 
     func restore(id: String) {
         guard let index = trashItems.firstIndex(where: { $0.id == id }) else { return }
-        let item = trashItems.remove(at: index)
+        let trashed = trashItems.remove(at: index)
+        var item = trashed
+        // Cleared on the way out, or a restored photograph would sit in the timeline still claiming
+        // a date of deletion — and `recentlyAdded` and the trash view would both count it.
+        item.deletedAt = nil
         allItems.insert(item, at: 0)
 
         Task {
@@ -380,7 +410,29 @@ final class PhotoLibraryService: ObservableObject {
             } catch {
                 logger.error("restore failed: id=\(id, privacy: .public) \(error, privacy: .public)")
                 allItems.removeAll { $0.id == id }
-                trashItems.append(item)
+                trashItems.append(trashed)
+                self.error = error.localizedDescription
+            }
+        }
+    }
+
+    /// Deletes one trashed item for good — the record and the Drive file behind it.
+    ///
+    /// Only from the trash. `DELETE /api/v1/photos/{id}/permanent` refuses a live photograph, and
+    /// this refuses to call it for one, so the two-step path through Recently Deleted cannot be
+    /// short-circuited into an unrecoverable delete one tap deep.
+    func deletePermanently(id: String) {
+        guard let index = trashItems.firstIndex(where: { $0.id == id }) else { return }
+        let item = trashItems.remove(at: index)
+
+        Task {
+            do {
+                _ = try await api.send(method: "DELETE", path: "/api/v1/photos/\(id)/permanent")
+                try? await store?.delete(id: id)
+                logger.debug("deletePermanently succeeded: id=\(id, privacy: .public)")
+            } catch {
+                logger.error("deletePermanently failed: id=\(id, privacy: .public) \(error, privacy: .public)")
+                trashItems.insert(item, at: min(index, trashItems.count))
                 self.error = error.localizedDescription
             }
         }

@@ -121,6 +121,17 @@ actor LocalStore {
         );
         CREATE INDEX import_queue_state ON import_queue(state, sort_index);
         """,
+
+        // 3 — when a trashed item was deleted (Epic 9).
+        //
+        // Needed on the device rather than only on the server because Recently Deleted is one of the
+        // views a cold launch with no signal draws from the cache, and a countdown that only exists
+        // in the listing response would show "30 days left" for everything until the network
+        // answered. Nullable with no default: an item cached by an older build has no timestamp and
+        // shows no countdown, which is honest — `TrashRetention` returns nil rather than guessing.
+        """
+        ALTER TABLE photo ADD COLUMN deleted_at REAL;
+        """,
     ]
 
     /// What ``migrations`` adds up to. Asserted in tests so an appended migration that forgets to
@@ -276,7 +287,7 @@ actor LocalStore {
         // index order with no sort step — which is the whole reason the column exists.
         let sql = """
         SELECT id, file_id, file_name, mime_type, size_bytes, thumbnail, thumbnail_mime_type,
-               is_starred, is_archived, capture_date, created_at, updated_at, metadata
+               is_starred, is_archived, capture_date, created_at, updated_at, metadata, deleted_at
         FROM photo WHERE is_trashed = ? ORDER BY timeline_date DESC;
         """
         var items: [MediaItem] = []
@@ -293,8 +304,8 @@ actor LocalStore {
         INSERT OR REPLACE INTO photo
             (id, file_id, file_name, mime_type, size_bytes, thumbnail, thumbnail_mime_type,
              is_starred, is_archived, is_trashed, capture_date, created_at, updated_at,
-             timeline_date, metadata)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+             timeline_date, metadata, deleted_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
         """
         try run(sql) { statement in
             bind(statement, 1, item.id)
@@ -312,6 +323,18 @@ actor LocalStore {
             sqlite3_bind_double(statement, 13, item.updatedAt.timeIntervalSince1970)
             sqlite3_bind_double(statement, 14, item.timelineDate.timeIntervalSince1970)
             bind(statement, 15, item.metadata.flatMap(Self.encodeMetadata))
+            bind(statement, 16, item.deletedAt?.timeIntervalSince1970)
+        }
+    }
+
+    /// Forgets one item entirely — what a permanent delete leaves behind, which is nothing.
+    ///
+    /// Distinct from writing it back with `is_trashed = 1`: that is a soft delete and the row has to
+    /// survive it. This is the row going away, so a cold launch does not hydrate a photograph the
+    /// account no longer has.
+    func delete(id: String) throws {
+        try run("DELETE FROM photo WHERE id = ?;") { statement in
+            bind(statement, 1, id)
         }
     }
 
@@ -329,6 +352,7 @@ actor LocalStore {
             captureDate: date(statement, 9),
             createdAt: date(statement, 10) ?? Date(timeIntervalSince1970: 0),
             updatedAt: date(statement, 11) ?? Date(timeIntervalSince1970: 0),
+            deletedAt: date(statement, 13),
             metadata: text(statement, 12).flatMap(decodeMetadata)
         )
     }

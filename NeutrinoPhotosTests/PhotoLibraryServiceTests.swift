@@ -229,6 +229,127 @@ final class PhotoLibraryServiceTests: XCTestCase {
         XCTAssertNotNil(sut.error)
     }
 
+    func testTrashingStampsDeletedAtAndRestoringClearsIt() async {
+        MockURLProtocol.respond(data: Fixture.listingJSON([Fixture.photoJSON(id: "a")]))
+        await sut.load()
+        XCTAssertNil(sut.allItems.first?.deletedAt)
+
+        MockURLProtocol.respond(json: "", statusCode: 204)
+        let before = Date()
+        sut.trash(id: "a")
+        await settle()
+
+        // `DELETE /photos/{id}` answers 204 with no body, so there is no server timestamp to read
+        // back — without stamping it here the countdown would show nothing until a `loadTrash()`.
+        let deletedAt = sut.trashItems.first?.deletedAt
+        XCTAssertNotNil(deletedAt)
+        XCTAssertGreaterThanOrEqual(deletedAt ?? .distantPast, before)
+        XCTAssertEqual(TrashRetention.daysRemaining(for: sut.trashItems[0]), TrashRetention.days)
+
+        MockURLProtocol.respond(json: Fixture.photoJSON(id: "a"))
+        sut.restore(id: "a")
+        await settle()
+
+        XCTAssertNil(sut.allItems.first?.deletedAt,
+                     "a restored photo still claiming a deletion date would be counted as trashed")
+    }
+
+    func testAFailedTrashPutsTheItemBackWithoutADeletionDate() async {
+        MockURLProtocol.respond(data: Fixture.listingJSON([Fixture.photoJSON(id: "a")]))
+        await sut.load()
+
+        MockURLProtocol.respond(json: "{}", statusCode: 500)
+        sut.trash(id: "a")
+        await settle()
+
+        XCTAssertEqual(sut.allItems.map(\.id), ["a"])
+        XCTAssertTrue(sut.trashItems.isEmpty)
+        XCTAssertNil(sut.allItems.first?.deletedAt,
+                     "the rollback has to undo the stamp too, or the item is live and 'deleted'")
+    }
+
+    // MARK: - Permanent delete
+
+    func testDeletePermanentlyRemovesTheItemAndHitsThePermanentPath() async {
+        MockURLProtocol.respond(data: Fixture.listingJSON([
+            Fixture.photoJSON(id: "gone", deletedAt: Date()),
+        ]))
+        await sut.loadTrash()
+
+        MockURLProtocol.respond(json: "", statusCode: 204)
+        sut.deletePermanently(id: "gone")
+        XCTAssertTrue(sut.trashItems.isEmpty)
+        await settle()
+
+        let request = MockURLProtocol.request { ($0.url?.path ?? "").hasSuffix("/permanent") }
+        XCTAssertEqual(request?.url?.path, "/api/v1/photos/gone/permanent")
+        XCTAssertEqual(request?.httpMethod, "DELETE")
+    }
+
+    func testDeletePermanentlyPutsTheItemBackWhenTheServerRefuses() async {
+        MockURLProtocol.respond(data: Fixture.listingJSON([
+            Fixture.photoJSON(id: "gone", deletedAt: Date()),
+        ]))
+        await sut.loadTrash()
+
+        MockURLProtocol.respond(json: "{}", statusCode: 500)
+        sut.deletePermanently(id: "gone")
+        await settle()
+
+        XCTAssertEqual(sut.trashItems.map(\.id), ["gone"])
+        XCTAssertNotNil(sut.error)
+    }
+
+    func testDeletePermanentlyIgnoresAnItemThatIsNotInTheTrash() async {
+        MockURLProtocol.respond(data: Fixture.listingJSON([Fixture.photoJSON(id: "live")]))
+        await sut.load()
+        let before = MockURLProtocol.requestCount
+
+        sut.deletePermanently(id: "live")
+        await settle()
+
+        // The two-step path through Recently Deleted is the whole point of having one; the app
+        // refuses to short-circuit it even though the server would refuse too.
+        XCTAssertEqual(sut.allItems.map(\.id), ["live"])
+        XCTAssertEqual(MockURLProtocol.requestCount, before, "no request should have gone out")
+    }
+
+    // MARK: - Recently Added
+
+    func testRecentlyAddedIsOrderedByArrivalNotByCaptureDate() async {
+        // The distinction the view exists for: a scanned photograph from 1998 imported today is
+        // *recently added* and is nowhere near the top of the timeline.
+        let now = Date()
+        MockURLProtocol.respond(data: Fixture.listingJSON([
+            Fixture.photoJSON(id: "scanned",
+                              captureDate: Date(timeIntervalSince1970: 900_000_000),
+                              createdAt: now),
+            Fixture.photoJSON(id: "older-import",
+                              captureDate: now,
+                              createdAt: now.addingTimeInterval(-2 * 86_400)),
+        ]))
+        await sut.load()
+
+        XCTAssertEqual(sut.recentlyAdded(now: now).map(\.id), ["scanned", "older-import"])
+        XCTAssertEqual(sut.timeline(showingArchived: false).map(\.id), ["older-import", "scanned"],
+                       "the timeline still sorts by capture date — the two views disagree on purpose")
+    }
+
+    func testRecentlyAddedExcludesOldArrivalsAndArchivedItems() async {
+        let now = Date()
+        MockURLProtocol.respond(data: Fixture.listingJSON([
+            Fixture.photoJSON(id: "fresh", createdAt: now.addingTimeInterval(-86_400)),
+            Fixture.photoJSON(id: "ancient", createdAt: now.addingTimeInterval(-60 * 86_400)),
+            Fixture.photoJSON(id: "archived", isArchived: true,
+                              createdAt: now.addingTimeInterval(-86_400)),
+        ]))
+        await sut.load()
+
+        // Archiving is the user saying "keep this out of the way"; a second view that shows it
+        // anyway would undo that for a month.
+        XCTAssertEqual(sut.recentlyAdded(now: now).map(\.id), ["fresh"])
+    }
+
     // MARK: - Metadata
 
     func testMetadataIsAttachedLocallyAndPublishedToTheWorkerEndpoint() async throws {

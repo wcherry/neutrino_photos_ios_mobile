@@ -53,6 +53,57 @@ final class LocalStoreTests: XCTestCase {
         XCTAssertGreaterThan(LocalStore.schemaVersion, 0)
     }
 
+    // MARK: - Deletion date (schema 3)
+
+    func testADeletionDateSurvivesTheRoundTrip() async throws {
+        let store = try makeStore()
+        let deletedAt = Date(timeIntervalSince1970: 1_700_200_000)
+
+        try await store.save(Fixture.item(id: "gone", deletedAt: deletedAt), trashed: true)
+        let trashed = try await store.trashedItems()
+
+        let restored = try XCTUnwrap(trashed.first)
+        // Recently Deleted is one of the views a cold launch with no signal draws from the cache,
+        // so the countdown has to survive on disk rather than only in the listing response.
+        XCTAssertEqual(restored.deletedAt?.timeIntervalSince1970 ?? 0,
+                       deletedAt.timeIntervalSince1970, accuracy: 1)
+        XCTAssertEqual(TrashRetention.daysRemaining(for: restored,
+                                                    now: deletedAt.addingTimeInterval(86_400)), 29)
+    }
+
+    func testALiveRowHasNoDeletionDateAfterTheRoundTrip() async throws {
+        let store = try makeStore()
+        try await store.save(Fixture.item(id: "live"))
+
+        let items = try await store.libraryItems()
+        XCTAssertNil(items.first?.deletedAt)
+    }
+
+    func testDeletingARowRemovesItFromBothListings() async throws {
+        let store = try makeStore()
+        try await store.save(Fixture.item(id: "gone", deletedAt: Date()), trashed: true)
+        try await store.save(Fixture.item(id: "kept"))
+
+        try await store.delete(id: "gone")
+
+        let live = try await store.libraryItems()
+        let trashed = try await store.trashedItems()
+        // Distinct from a soft delete, which writes the row back with `is_trashed = 1`. A permanent
+        // delete leaves nothing, so a cold launch cannot hydrate a photograph the account has lost.
+        XCTAssertEqual(live.map(\.id), ["kept"])
+        XCTAssertTrue(trashed.isEmpty)
+    }
+
+    func testDeletingARowThatIsNotThereIsHarmless() async throws {
+        let store = try makeStore()
+        try await store.save(Fixture.item(id: "kept"))
+
+        try await store.delete(id: "never-existed")
+
+        let items = try await store.libraryItems()
+        XCTAssertEqual(items.map(\.id), ["kept"])
+    }
+
     // MARK: - Round trip
 
     func testARowSurvivesTheRoundTripIntact() async throws {
