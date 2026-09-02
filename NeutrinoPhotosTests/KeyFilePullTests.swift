@@ -1,6 +1,7 @@
 import XCTest
 import Sodium
 import NeutrinoCrypto
+import NeutrinoAuth
 @testable import NeutrinoPhotos
 
 // MARK: - KeyFilePullTests
