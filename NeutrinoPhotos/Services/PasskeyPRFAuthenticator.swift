@@ -4,6 +4,7 @@ import Foundation
 import Sodium
 import UIKit
 import os.log
+import NeutrinoAuth
 
 // MARK: - PasskeyPRFError
 

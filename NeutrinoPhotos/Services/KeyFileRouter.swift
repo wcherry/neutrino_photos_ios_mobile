@@ -1,5 +1,6 @@
 import Foundation
 import os.log
+import NeutrinoCrypto
 
 // MARK: - KeyFileRouter
 

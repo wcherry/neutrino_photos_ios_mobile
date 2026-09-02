@@ -1,4 +1,5 @@
 import XCTest
+import NeutrinoCrypto
 @testable import NeutrinoPhotos
 
 // MARK: - KeyVaultServiceTests
@@ -155,7 +156,8 @@ final class KeyVaultServiceTests: XCTestCase {
         XCTAssertTrue(KeyImportService.hasStoredKeys())
         let content = MediaContentService(api: APIClient(session: MockURLProtocol.makeSession()))
         let dek = MediaCrypto.newDEK()
-        XCTAssertEqual(try content.unsealDEK(try content.sealDEK(dek)), dek)
+        let sealed = try content.sealDEK(dek)
+        XCTAssertEqual(try content.unsealDEK(sealed.sealed, keyVersion: sealed.keyVersion), dek)
     }
 
     func testAWrongPasswordIsReportedAndStoresNothing() async {

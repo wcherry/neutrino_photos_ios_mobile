@@ -1,6 +1,7 @@
 import CryptoKit
 import Foundation
 import Sodium
+import NeutrinoCrypto
 
 // MARK: - KeyVaultCryptoError
 

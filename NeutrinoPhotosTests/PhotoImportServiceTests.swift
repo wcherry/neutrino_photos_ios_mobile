@@ -1,5 +1,7 @@
 import CryptoKit
 import XCTest
+import NeutrinoCore
+import NeutrinoCrypto
 @testable import NeutrinoPhotos
 
 // MARK: - PhotoImportServiceTests
