@@ -3,6 +3,13 @@ packages:
   swift-sodium:
     url: https://github.com/jedisct1/swift-sodium
     from: "0.9.1"
+  # The code shared with the other Neutrino iOS apps: account identity, the
+  # OAuth/PKCE flow, the E2EE key lifecycle and the sign-in screens.
+  #
+  # A local path, so the two repositories have to sit side by side. Swap this for
+  # `url:` + `from:` once neutrino_shared_ios is pushed and tagged.
+  NeutrinoShared:
+    path: ../neutrino_shared_ios
 options:
   bundleIdPrefix: com.neutrino
   deploymentTarget:
@@ -20,6 +27,14 @@ targets:
       # app encrypts an upload with, so a photo taken here opens there and vice versa.
       - package: swift-sodium
         product: Sodium
+      - package: NeutrinoShared
+        product: NeutrinoCore
+      - package: NeutrinoShared
+        product: NeutrinoAuth
+      - package: NeutrinoShared
+        product: NeutrinoCrypto
+      - package: NeutrinoShared
+        product: NeutrinoUI
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.neutrino.photos
