@@ -1,4 +1,6 @@
 import XCTest
+import NeutrinoCore
+import NeutrinoCrypto
 @testable import NeutrinoPhotos
 
 // MARK: - KeychainAccessibilityTests

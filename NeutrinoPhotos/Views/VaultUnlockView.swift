@@ -1,4 +1,5 @@
 import SwiftUI
+import NeutrinoUI
 
 // MARK: - VaultUnlockView
 

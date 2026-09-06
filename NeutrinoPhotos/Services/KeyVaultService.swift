@@ -1,6 +1,7 @@
 import Foundation
 import Sodium
 import os.log
+import NeutrinoCrypto
 
 // MARK: - Wire types
 //
@@ -292,6 +293,13 @@ final class KeyVaultService: ObservableObject {
         keyBelongsToAnotherAccount = false
         status = .unlocked
         logger.info("vault opened via \(method, privacy: .public)")
+
+        // The vault holds one identity, the active one. Anything sealed to a version this account
+        // has rotated away from needs the key file, and this is the moment the key that opens it
+        // arrives. Detached, like `markUsed` below, because this method is the synchronous tail of
+        // the unlock and the unlock has already succeeded — a network round trip must not hold it
+        // open, and a failure here is retried on the next launch.
+        Task { try? await KeyFileService.shared.restoreArchivedKeys() }
 
         // Bookkeeping only — a failure here must not fail an unlock that already worked.
         Task { await markUsed(unlockID) }

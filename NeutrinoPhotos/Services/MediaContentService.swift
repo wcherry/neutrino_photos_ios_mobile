@@ -2,11 +2,17 @@ import Foundation
 import Sodium
 import UIKit
 import os.log
+import NeutrinoCore
+import NeutrinoCrypto
 
 // MARK: - MediaContentError
 
 enum MediaContentError: LocalizedError {
     case noEncryptionKey
+    /// This device holds an identity, but not the version this photo's DEK was sealed to. Named
+    /// separately from `noEncryptionKey` because it sends the user somewhere else: not "import your
+    /// key" but "this account rotated and this device is missing a version".
+    case missingKeyVersion(Int)
     case encryptionFailed
     case decryptionFailed
     case notAuthenticated
@@ -17,6 +23,8 @@ enum MediaContentError: LocalizedError {
         switch self {
         case .noEncryptionKey:
             return "No encryption key found. Import your key to open originals."
+        case .missingKeyVersion(let version):
+            return "This photo needs encryption key version \(version), which this device does not have. Scanning the key code again will not help \u{2014} it carries one key. On the computer that holds your key, open Settings \u{203A} Encryption and back up your older keys, then reopen this app."
         case .encryptionFailed:
             return "Failed to encrypt the photo."
         case .decryptionFailed:
@@ -28,6 +36,31 @@ enum MediaContentError: LocalizedError {
         case .cacheUnavailable:
             return "There isn't enough room on this device to open that."
         }
+    }
+}
+
+// MARK: - SealedFileKey
+
+/// A photo's DEK as the server holds it: the sealed blob, and which of the caller's identity
+/// versions it was sealed to.
+///
+/// The two travel together everywhere because they are only meaningful together. Passing the blob
+/// alone is what let a rotated account's older photos fail to open — the caller had no way to know
+/// which key to reach for, so it always reached for the newest.
+struct SealedFileKey: Equatable {
+    let sealed: String
+    let keyVersion: Int
+
+    init(sealed: String, keyVersion: Int) {
+        self.sealed = sealed
+        self.keyVersion = keyVersion
+    }
+
+    /// A ref written before versioning carries no version. Read as 1, which is what the server
+    /// defaults `file_key_refs.key_version` to for the same rows.
+    fileprivate init(_ response: APIKeyResponse) {
+        self.sealed = response.encryptedFileKey
+        self.keyVersion = response.keyVersion ?? 1
     }
 }
 
@@ -290,7 +323,7 @@ final class MediaContentService: ObservableObject {
     /// A large file that turns out to be single-push is decrypted whole, because the format leaves
     /// no choice. That is why ``chunkingThreshold`` exists: everything this app writes above it is
     /// chunked, so the only files that can land here are ones another client wrote.
-    private func downloadStreaming(item: MediaItem, sealedDEK: String?, key: String) async throws -> URL {
+    private func downloadStreaming(item: MediaItem, sealedDEK: SealedFileKey?, key: String) async throws -> URL {
         try FileManager.default.createDirectory(at: stagingDirectory, withIntermediateDirectories: true)
         let ciphertextURL = stagingDirectory.appendingPathComponent("\(UUID().uuidString).enc")
         let plaintextURL = stagingDirectory.appendingPathComponent("\(UUID().uuidString).dec")
@@ -308,7 +341,7 @@ final class MediaContentService: ObservableObject {
             return url
         }
 
-        let dek = try unsealDEK(sealedDEK)
+        let dek = try unsealDEK(sealedDEK.sealed, keyVersion: sealedDEK.keyVersion)
         let chunkSize = try await chunkSize(forFileID: item.fileID, dek: dek)
         try await api.download(path: "/api/v1/drive/files/\(item.fileID)", to: ciphertextURL)
 
@@ -347,12 +380,12 @@ final class MediaContentService: ObservableObject {
         return try await decrypt(ciphertext, sealedDEK: sealedDEK, fileID: fileID)
     }
 
-    private func decrypt(_ ciphertext: Data, sealedDEK: String?, fileID: String) async throws -> Data {
+    private func decrypt(_ ciphertext: Data, sealedDEK: SealedFileKey?, fileID: String) async throws -> Data {
         guard let sealedDEK else {
             logger.debug("\(fileID, privacy: .public) has no key ref, using bytes as they are")
             return ciphertext
         }
-        let dek = try unsealDEK(sealedDEK)
+        let dek = try unsealDEK(sealedDEK.sealed, keyVersion: sealedDEK.keyVersion)
         // One push covering the whole file — what this app writes below `chunkingThreshold` and
         // what the web client writes always.
         return try await Self.offMain { Data(try MediaCrypto.decrypt(ciphertext, dek: dek)) }
@@ -472,10 +505,14 @@ final class MediaContentService: ObservableObject {
     /// The upload endpoint takes ciphertext, not the sealed key, so the key ref is a second call —
     /// and a picture whose key never stored is one nothing can ever open. Allowed to throw rather
     /// than being fire-and-forget.
-    private func finishUpload(response: Data, sealedFileKey: String) async throws -> String {
+    private func finishUpload(response: Data, sealedFileKey: SealedFileKey) async throws -> String {
         let created = try Self.driveDecoder.decode(APIFileResponse.self, from: response)
+        // `keyVersion` is sent, not left to the server's default of 1. Omitting it on a rotated
+        // account files a photo sealed to v3 under v1, and every client — this one included — then
+        // reaches for the wrong key and cannot open a picture that is perfectly intact.
         _ = try await api.send(method: "PUT", path: "/api/v1/drive/files/\(created.id)/key",
-                               json: APIStoreKeyRequest(encryptedFileKey: sealedFileKey))
+                               json: APIStoreKeyRequest(encryptedFileKey: sealedFileKey.sealed,
+                                                        keyVersion: sealedFileKey.keyVersion))
         return created.id
     }
 
@@ -619,25 +656,52 @@ final class MediaContentService: ObservableObject {
     // can be called off the main thread and asserted on its own. What stays here is the part that
     // needs the Keychain: which key pair a DEK is sealed to.
 
-    /// Seals `dek` to the account's stored Curve25519 public key (`crypto_box_seal`).
-    func sealDEK(_ dek: Bytes) throws -> String {
+    /// Seals `dek` to the account's **active** Curve25519 public key (`crypto_box_seal`), and
+    /// reports which version that was.
+    ///
+    /// The version travels with the sealed key because the server records it on the key ref, and a
+    /// ref that names the wrong version is a photo nothing can open: the web client reaches for the
+    /// key the ref names, not the one it was actually sealed to.
+    func sealDEK(_ dek: Bytes) throws -> SealedFileKey {
         guard let publicKey = Self.storedKey(KeyImportService.publicKeyKeychainKey) else {
             throw MediaContentError.noEncryptionKey
         }
-        return try MediaCrypto.seal(dek: dek, toPublicKey: publicKey)
+        return SealedFileKey(sealed: try MediaCrypto.seal(dek: dek, toPublicKey: publicKey),
+                             keyVersion: KeyImportService.activeKeyVersion())
     }
 
-    /// Reverses ``sealDEK(_:)`` with the stored private key (`crypto_box_seal_open`).
-    func unsealDEK(_ sealedBase64: String) throws -> Bytes {
-        guard let publicKey = Self.storedKey(KeyImportService.publicKeyKeychainKey),
-              let secretKey = Self.storedKey(KeyImportService.privateKeyKeychainKey) else {
-            logger.error("unsealDEK: no stored key pair, or the stored key is not valid Base64URL")
+    /// Reverses ``sealDEK(_:)``, resolving `keyVersion` against the keys this device holds.
+    ///
+    /// `keyVersion` defaults to 1 because key refs written before rotation existed carry no
+    /// version, and the server defaults the column to 1 for the same reason.
+    ///
+    /// A version this device lacks is reported as `missingKeyVersion` rather than as a decrypt
+    /// failure. The distinction is the whole point of the versioning: the ciphertext is fine, the
+    /// DEK is fine, and what is missing is one key that can still be brought across.
+    func unsealDEK(_ sealedBase64: String, keyVersion: Int = 1) throws -> Bytes {
+        let publicKey: Bytes
+        let secretKey: Bytes
+        switch KeyImportService.keyPair(forVersion: keyVersion) {
+        case .found(let publicKeyBase64, let privateKeyBase64):
+            guard let decodedPublic = KeyVaultCrypto.decodeBase64URL(publicKeyBase64),
+                  let decodedSecret = KeyVaultCrypto.decodeBase64URL(privateKeyBase64) else {
+                logger.error("unsealDEK: the stored key is not valid Base64URL")
+                throw MediaContentError.noEncryptionKey
+            }
+            publicKey = decodedPublic
+            secretKey = decodedSecret
+        case .noKey:
+            logger.error("unsealDEK: this device holds no encryption key")
             throw MediaContentError.noEncryptionKey
+        case .missingVersion(let version):
+            logger.error("unsealDEK: no key for version \(version, privacy: .public)")
+            throw MediaContentError.missingKeyVersion(version)
         }
+
         do {
             return try MediaCrypto.openDEK(sealedBase64, publicKey: publicKey, secretKey: secretKey)
         } catch {
-            logger.error("unsealDEK: the seal was not made to this device's public key")
+            logger.error("unsealDEK: the seal was not made to key version \(keyVersion, privacy: .public)")
             throw error
         }
     }
@@ -652,12 +716,12 @@ final class MediaContentService: ObservableObject {
     ///
     /// `GET /files/{id}/key` answers 404 for that case (`get_file_key` in
     /// `src/drive/encryption/api.rs`), which is a fact about the file rather than a failure.
-    private func fetchSealedDEKIfPresent(fileID: String) async throws -> String? {
+    private func fetchSealedDEKIfPresent(fileID: String) async throws -> SealedFileKey? {
         let decoder = JSONDecoder()
         decoder.keyDecodingStrategy = .convertFromSnakeCase
         let response: APIKeyResponse? = try await api.getIfPresent(
             "/api/v1/drive/files/\(fileID)/key", decoder: decoder)
-        return response?.encryptedFileKey
+        return response.map(SealedFileKey.init)
     }
 
     // MARK: - Off the main actor
@@ -713,8 +777,13 @@ private struct APIFileResponse: Decodable {
 
 private struct APIKeyResponse: Decodable {
     let encryptedFileKey: String
+    /// Which of the caller's identity versions the DEK is sealed to. Optional so a server that
+    /// predates versioning still decodes; `SealedFileKey` reads a missing value as 1, matching the
+    /// column's own default.
+    let keyVersion: Int?
 }
 
 private struct APIStoreKeyRequest: Encodable {
     let encryptedFileKey: String
+    let keyVersion: Int
 }

@@ -1,4 +1,8 @@
 import SwiftUI
+import NeutrinoCore
+import NeutrinoAuth
+import NeutrinoCrypto
+import NeutrinoUI
 
 // MARK: - NeutrinoPhotosApp
 
@@ -14,7 +18,7 @@ struct NeutrinoPhotosApp: App {
 
     // MARK: - Services
 
-    @StateObject private var authService = AuthService()
+    @StateObject private var authService: AuthService
     @StateObject private var settings: AppSettings
     @StateObject private var networkMonitor: NetworkMonitor
     @StateObject private var api: APIClient
@@ -29,7 +33,7 @@ struct NeutrinoPhotosApp: App {
     @StateObject private var drive: PhotosDriveService
     @StateObject private var thumbnails: ThumbnailCache
     @StateObject private var deviceLibrary: DevicePhotoLibrary
-    @StateObject private var keyFiles = KeyFileRouter()
+    @StateObject private var keyFiles: KeyFileRouter
 
     /// The device's copy of the library. Optional because opening a database can fail — a full
     /// disk, a device the user has locked out of its own storage — and every consumer treats it as
@@ -42,6 +46,14 @@ struct NeutrinoPhotosApp: App {
     // MARK: - Init
 
     init() {
+        // Before anything else. Every shared service resolves its Keychain namespace, OAuth client
+        // id and default host through this, and `NeutrinoApp.current` traps if one is built first —
+        // which is also why `authService` and `keyFiles` have no default value above: property
+        // defaults are evaluated before this body runs. `nphoto.*` is what previous builds wrote,
+        // so this reads the existing session and encryption key rather than starting cold.
+        NeutrinoApp.configure(.photos)
+        NeutrinoBrand.use(.photos)
+
         // Built here rather than lazily inside the services so there is exactly one client, one
         // `URLSession`, and one place a test can swap the transport.
         let api = APIClient()
@@ -67,6 +79,8 @@ struct NeutrinoPhotosApp: App {
                                            ledger: ledger, deviceLibrary: deviceLibrary)
 
         self.store = store
+        _authService = StateObject(wrappedValue: AuthService())
+        _keyFiles = StateObject(wrappedValue: KeyFileRouter())
         _api = StateObject(wrappedValue: api)
         _library = StateObject(wrappedValue: library)
         _albums = StateObject(wrappedValue: albums)
@@ -133,8 +147,17 @@ struct NeutrinoPhotosApp: App {
     private func configure() async {
         // Idempotent: `.task` runs again if the scene is rebuilt, and this is a reference write.
         api.authService = authService
+        KeyFileService.shared.authService = authService
 
         guard authService.isAuthenticated else { return }
+
+        // Top up this device's retired keys from the account's key file. Enrolment already does
+        // this, so on a healthy install it finds nothing; it is here for the device enrolled before
+        // the key file existed, and for the one that was offline when its key arrived. One request,
+        // and a failure is not worth surfacing — the next launch tries again.
+        if KeyImportService.hasStoredKeys() {
+            Task { try? await KeyFileService.shared.restoreArchivedKeys() }
+        }
         // Before anything else that could import: the ledger is what keeps a second run from
         // doubling the library, and an importer that started before it hydrated would have an empty
         // one. `restore()` hydrates it and reads back a queue the last launch was killed mid-way

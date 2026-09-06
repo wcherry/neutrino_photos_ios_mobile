@@ -74,7 +74,7 @@ final class MediaContentServiceTests: XCTestCase {
         let dek = MediaCrypto.newDEK()
 
         let sealed = try sut.sealDEK(dek)
-        XCTAssertEqual(try sut.unsealDEK(sealed), dek)
+        XCTAssertEqual(try sut.unsealDEK(sealed.sealed, keyVersion: sealed.keyVersion), dek)
     }
 
     func testSealingWithoutAKeyIsRefused() {
@@ -95,7 +95,7 @@ final class MediaContentServiceTests: XCTestCase {
         let sealed = try sut.sealDEK(dek)
 
         MockURLProtocol.route([
-            ("/key", 200, Data(#"{"encrypted_file_key":"\#(sealed)"}"#.utf8)),
+            ("/key", 200, Data(#"{"encrypted_file_key":"\#(sealed.sealed)","key_version":\#(sealed.keyVersion)}"#.utf8)),
             ("/drive/files/", 200, ciphertext),
         ])
 
@@ -121,7 +121,7 @@ final class MediaContentServiceTests: XCTestCase {
         let sealed = try sut.sealDEK(MediaCrypto.newDEK())
         TestKeys.remove()
         MockURLProtocol.route([
-            ("/key", 200, Data(#"{"encrypted_file_key":"\#(sealed)"}"#.utf8)),
+            ("/key", 200, Data(#"{"encrypted_file_key":"\#(sealed.sealed)","key_version":\#(sealed.keyVersion)}"#.utf8)),
             ("/drive/files/", 200, Data(repeating: 7, count: 128)),
         ])
 
@@ -162,7 +162,7 @@ final class MediaContentServiceTests: XCTestCase {
         let reader = makeStreamingService(streamingThreshold: .max)
         MockURLProtocol.reset()
         MockURLProtocol.route([
-            ("/key", 200, Data(#"{"encrypted_file_key":"\#(sealedKey)"}"#.utf8)),
+            ("/key", 200, Data(#"{"encrypted_file_key":"\#(sealedKey)","key_version":1}"#.utf8)),
             ("/drive/files/", 200, storedCiphertext),
         ])
 
@@ -257,7 +257,7 @@ final class MediaContentServiceTests: XCTestCase {
         try await store.setRenditionFileID("rendition-1", forFile: "file-p", rendition: .preview)
 
         MockURLProtocol.route([
-            ("/rendition-1/key", 200, Data(#"{"encrypted_file_key":"\#(sealed)"}"#.utf8)),
+            ("/rendition-1/key", 200, Data(#"{"encrypted_file_key":"\#(sealed.sealed)","key_version":\#(sealed.keyVersion)}"#.utf8)),
             ("/drive/files/rendition-1", 200, try MediaCrypto.encrypt(Bytes(previewBytes), dek: dek)),
         ])
 
@@ -447,7 +447,7 @@ final class MediaContentServiceTests: XCTestCase {
         let ciphertext = try MediaCrypto.encrypt(Bytes(motion), dek: dek)
         let sealed = try sut.sealDEK(dek)
         MockURLProtocol.route([
-            ("/files/live-1/key", 200, Data(#"{"encrypted_file_key":"\#(sealed)"}"#.utf8)),
+            ("/files/live-1/key", 200, Data(#"{"encrypted_file_key":"\#(sealed.sealed)","key_version":\#(sealed.keyVersion)}"#.utf8)),
             ("/files/live-1", 200, ciphertext),
         ])
         let item = Fixture.item(metadata: MediaMetadata(
@@ -623,7 +623,7 @@ final class MediaContentServiceTests: XCTestCase {
               "coverThumbnail":null,"coverThumbnailMimeType":null,
               "encryptedMetadata":"\(encryptedMetadata)","contentVersion":1}
              """.utf8)),
-            ("/key", 200, Data(#"{"encrypted_file_key":"\#(sealedKey)"}"#.utf8)),
+            ("/key", 200, Data(#"{"encrypted_file_key":"\#(sealedKey)","key_version":1}"#.utf8)),
             ("/drive/files/", 200, ciphertext),
         ])
 
@@ -705,7 +705,8 @@ final class MediaContentServiceTests: XCTestCase {
             $0.httpMethod == "PUT" && ($0.url?.path ?? "").hasSuffix("/key")
         })
         let body = MockURLProtocol.bodies[index]
-        let json = try XCTUnwrap(try JSONSerialization.jsonObject(with: body) as? [String: String])
-        return try XCTUnwrap(json["encryptedFileKey"])
+        // Not `[String: String]`: the body carries `keyVersion` as a number beside the sealed key.
+        let json = try XCTUnwrap(try JSONSerialization.jsonObject(with: body) as? [String: Any])
+        return try XCTUnwrap(json["encryptedFileKey"] as? String)
     }
 }

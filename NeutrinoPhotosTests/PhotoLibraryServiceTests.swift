@@ -1,4 +1,5 @@
 import XCTest
+import NeutrinoAuth
 @testable import NeutrinoPhotos
 
 // MARK: - PhotoLibraryServiceTests

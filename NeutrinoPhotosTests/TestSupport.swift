@@ -4,6 +4,9 @@ import ImageIO
 import UIKit
 import UniformTypeIdentifiers
 import XCTest
+import NeutrinoCore
+import NeutrinoAuth
+import NeutrinoCrypto
 @testable import NeutrinoPhotos
 
 // MARK: - TestKeys
