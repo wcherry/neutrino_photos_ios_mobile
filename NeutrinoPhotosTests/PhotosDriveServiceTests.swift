@@ -290,7 +290,7 @@ final class PhotosDriveServiceTests: XCTestCase {
         return """
         {"id":"\(id)","name":"\(name)","sizeBytes":1234,"mimeType":"image/jpeg","folderId":null,
          "isStarred":false,"createdAt":"2026-08-01T10:00:00","updatedAt":"2026-08-01T10:00:00",
-         "coverThumbnail":null,"coverThumbnailMimeType":null,"encryptedMetadata":\(metadata),
+         "coverThumbnailUrl":null,"encryptedMetadata":\(metadata),
          "contentVersion":1}
         """
     }
