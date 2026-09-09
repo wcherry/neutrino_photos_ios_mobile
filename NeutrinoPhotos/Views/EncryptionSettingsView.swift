@@ -14,9 +14,13 @@ import NeutrinoUI
 struct EncryptionSettingsView: View {
 
     @EnvironmentObject private var vault: KeyVaultService
+    @EnvironmentObject private var keyProvisioning: KeyProvisioningService
 
     @State private var showsUnlock = false
     @State private var showsLockConfirmation = false
+    @State private var showsEncryptionSetup = false
+    @State private var showsKitRestore = false
+    @State private var canProvisionKey = false
 
     // MARK: - Body
 
@@ -24,13 +28,36 @@ struct EncryptionSettingsView: View {
         List {
             statusSection
             if !vault.availableMethods.isEmpty { unlockMethodsSection }
+            recoverySection
             keyFileSection
             devicesSection
         }
         .navigationTitle("Encryption")
         .navigationBarTitleDisplayMode(.inline)
-        .task { await vault.refresh() }
+        .task {
+            await vault.refresh()
+            // One request, and only while this device has no key — an account that publishes one
+            // never sees the button, so there is nothing to re-check.
+            if !KeyImportService.hasStoredKeys() {
+                canProvisionKey = await keyProvisioning.canProvision()
+            }
+        }
         .refreshable { await vault.refresh() }
+        .fullScreenCover(isPresented: $showsEncryptionSetup) {
+            EncryptionSetupView(service: keyProvisioning) {
+                showsEncryptionSetup = false
+                Task {
+                    canProvisionKey = await keyProvisioning.canProvision()
+                    await vault.refresh()
+                }
+            }
+        }
+        .sheet(isPresented: $showsKitRestore) {
+            RecoveryKitRestoreView(service: keyProvisioning, isPresented: $showsKitRestore) {
+                canProvisionKey = false
+                Task { await vault.refresh() }
+            }
+        }
         .sheet(isPresented: $showsUnlock) {
             VaultUnlockView()
                 .environmentObject(vault)
@@ -203,6 +230,42 @@ struct EncryptionSettingsView: View {
                  The JSON file Neutrino exports on the web. Tapping one that has been AirDropped or \
                  saved to Files opens it here too.
                  """)
+        }
+    }
+
+    // MARK: - Recovery
+
+    /// The two routes that do not depend on a key already reaching this device by other means.
+    ///
+    /// Without the first of them, an account that has never published an identity key had nothing
+    /// to do here at all: `noVault` offered "Unlock", and there was no vault to unlock. The second
+    /// is what the web offers today — a key is minted on a device and never transmitted, so the
+    /// printed kit is the only copy that survives losing every enrolled device.
+    @ViewBuilder
+    private var recoverySection: some View {
+        if !KeyImportService.hasStoredKeys() {
+            Section {
+                if canProvisionKey {
+                    Button {
+                        showsEncryptionSetup = true
+                    } label: {
+                        Label("Set Up Encryption Key", systemImage: "checkmark.shield")
+                    }
+                }
+
+                Button {
+                    showsKitRestore = true
+                } label: {
+                    Label("Restore From Recovery Kit", systemImage: "text.book.closed")
+                }
+            } header: {
+                Text("Recovery")
+            } footer: {
+                Text(canProvisionKey
+                     ? "Your account has no encryption key yet. Setting one up here creates it on "
+                     + "this device and prints the kit that is its only backup."
+                     : "The kit you saved when your encryption key was created.")
+            }
         }
     }
 
