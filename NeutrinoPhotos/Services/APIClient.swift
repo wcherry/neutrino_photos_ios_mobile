@@ -23,6 +23,32 @@ enum APIError: LocalizedError {
     }
 }
 
+// MARK: - Cancellation
+
+extension Error {
+
+    /// True when this is the surrounding task being cancelled rather than something going wrong.
+    ///
+    /// Cancellation is routine here — SwiftUI cancels a `.task` when its `id` changes or the view
+    /// goes away, and ``ContentView`` re-keys its library refresh on `importer.isImporting`, so an
+    /// import starting mid-refresh cancels the request in flight. That is not a failure the user
+    /// caused or can act on, and `CancellationError` has no message worth reading: its
+    /// `localizedDescription` is the raw "The operation couldn't be completed.
+    /// (Swift.CancellationError error 1.)". Every catch that would put an error on screen asks this
+    /// first and stays quiet.
+    ///
+    /// `URLError.cancelled` counts too. ``APIClient`` maps it to `CancellationError` on the paths it
+    /// owns, but a cancelled transfer can still reach a caller through a wrapped
+    /// ``APIError/network(underlying:)``, so both shapes are unwrapped here rather than at each
+    /// call site.
+    var isCancellation: Bool {
+        if self is CancellationError { return true }
+        if let urlError = self as? URLError { return urlError.code == .cancelled }
+        if case .network(let underlying)? = self as? APIError { return underlying.isCancellation }
+        return false
+    }
+}
+
 // MARK: - APIClient
 
 /// Every authorized request this app makes to Neutrino goes through here.

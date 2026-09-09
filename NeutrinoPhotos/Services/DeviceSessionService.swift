@@ -81,6 +81,8 @@ final class DeviceSessionService: ObservableObject {
             }
             error = nil
             logger.debug("loaded \(self.sessions.count) session(s)")
+        } catch where error.isCancellation {
+            logger.debug("session load cancelled")
         } catch {
             self.error = error.localizedDescription
             logger.error("session load failed: \(error.localizedDescription, privacy: .public)")

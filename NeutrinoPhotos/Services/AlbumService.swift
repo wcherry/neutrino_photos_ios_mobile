@@ -59,6 +59,10 @@ final class AlbumService: ObservableObject {
                 return lhs.title.localizedStandardCompare(rhs.title) == .orderedAscending
             }
             logger.debug("load succeeded: \(response.albums.count) albums")
+        } catch where error.isCancellation {
+            // The tab went away mid-request. The albums already listed stay, and nothing on screen
+            // needs to say so.
+            logger.debug("load cancelled")
         } catch {
             logger.error("load failed: \(error, privacy: .public)")
             self.error = error.localizedDescription

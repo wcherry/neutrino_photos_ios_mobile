@@ -129,6 +129,8 @@ struct PhotoDetailView: View {
             saveOutcome = SaveOutcome(
                 title: "Saved",
                 message: "\(item.displayName) is in your device's photo library.")
+        } catch where error.isCancellation {
+            // The view went away mid-download. Nothing was saved and nobody is waiting on an alert.
         } catch {
             saveOutcome = SaveOutcome(title: "Couldn't Save",
                                       message: error.localizedDescription)
@@ -495,6 +497,10 @@ private struct MediaPage: View {
             // "No key on this device" is the one failure here with a next step, so it gets one.
             if case .noEncryptionKey = error { isLocked = true }
             self.error = error.localizedDescription
+            return
+        } catch where error.isCancellation {
+            // Swiping to the next photograph cancels this page's download — `.task(id:)` re-keys on
+            // the item. The page being left has nothing to report.
             return
         } catch {
             self.error = error.localizedDescription
