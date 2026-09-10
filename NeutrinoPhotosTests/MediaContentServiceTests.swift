@@ -620,7 +620,7 @@ final class MediaContentServiceTests: XCTestCase {
              {"id":"file-big","name":"clip.mov","sizeBytes":\(plaintext.count),
               "mimeType":"video/quicktime","folderId":null,"isStarred":false,
               "createdAt":"2026-08-01T10:00:00","updatedAt":"2026-08-01T10:00:00",
-              "coverThumbnail":null,"coverThumbnailMimeType":null,
+              "coverThumbnailUrl":null,
               "encryptedMetadata":"\(encryptedMetadata)","contentVersion":1}
              """.utf8)),
             ("/key", 200, Data(#"{"encrypted_file_key":"\#(sealedKey)","key_version":1}"#.utf8)),

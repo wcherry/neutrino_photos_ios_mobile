@@ -165,6 +165,11 @@ final class KeyVaultService: ObservableObject {
             keyBelongsToAnotherAccount = stored != nil && !matches
             status = matches ? .unlocked : .locked
             logger.debug("vault refreshed: \(String(describing: self.status), privacy: .public)")
+        } catch where error.isCancellation {
+            // Not an answer about the vault — the screen that asked went away. Leaving `status`
+            // alone matters here: reporting `.unreachable` would put an offline warning on an
+            // encryption screen that is merely being dismissed.
+            logger.debug("vault refresh cancelled")
         } catch {
             // Offline or a 5xx. Fall back to what the Keychain says rather than locking a library
             // the user can still browse — an unreachable server is not a reason to hide photographs.

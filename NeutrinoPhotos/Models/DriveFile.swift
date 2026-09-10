@@ -19,8 +19,14 @@ struct DriveFile: Identifiable, Hashable, Decodable {
     let folderID: String?
     let createdAt: Date
     let updatedAt: Date
-    /// The plaintext cover thumbnail, base64 without a `data:` prefix.
-    let coverThumbnail: String?
+    /// Relative URL of the plaintext cover thumbnail, e.g.
+    /// `/api/v1/drive/files/<id>/thumbnail?v=<updatedAt millis>`, or nil when the file has none.
+    ///
+    /// A URL rather than base64 bytes since issue #175: a listing used to carry an inline
+    /// thumbnail per row, which made a page of photographs several megabytes and cacheable by
+    /// nothing. The `v` is what makes the response safe to cache — it moves when the thumbnail
+    /// does — and the request needs the account's bearer token like any other Drive read.
+    let coverThumbnailURL: String?
     /// Base64url XChaCha20-Poly1305 ciphertext of `{ name, mimeType, chunkSize? }`. Present only
     /// for E2EE files — and the only place the chunk framing of the content is recorded, which is
     /// what a streaming download has to read before it can decrypt anything.
@@ -37,7 +43,7 @@ struct DriveFile: Identifiable, Hashable, Decodable {
     /// unchanged, so these names work under either.
     private enum CodingKeys: String, CodingKey {
         case id, name, sizeBytes, mimeType, folderId, createdAt, updatedAt
-        case coverThumbnail, encryptedMetadata
+        case coverThumbnailUrl, encryptedMetadata
     }
 
     init(from decoder: Decoder) throws {
@@ -50,13 +56,13 @@ struct DriveFile: Identifiable, Hashable, Decodable {
         folderID = try container.decodeIfPresent(String.self, forKey: .folderId)
         createdAt = try container.decodeIfPresent(Date.self, forKey: .createdAt) ?? Date()
         updatedAt = try container.decodeIfPresent(Date.self, forKey: .updatedAt) ?? createdAt
-        coverThumbnail = try container.decodeIfPresent(String.self, forKey: .coverThumbnail)
+        coverThumbnailURL = try container.decodeIfPresent(String.self, forKey: .coverThumbnailUrl)
         encryptedMetadata = try container.decodeIfPresent(String.self, forKey: .encryptedMetadata)
     }
 
     init(id: String, name: String, sizeBytes: Int64 = 0, mimeType: String = "image/jpeg",
          folderID: String? = nil, createdAt: Date = Date(), updatedAt: Date = Date(),
-         coverThumbnail: String? = nil, encryptedMetadata: String? = nil) {
+         coverThumbnailURL: String? = nil, encryptedMetadata: String? = nil) {
         self.id = id
         self.name = name
         self.sizeBytes = sizeBytes
@@ -64,7 +70,7 @@ struct DriveFile: Identifiable, Hashable, Decodable {
         self.folderID = folderID
         self.createdAt = createdAt
         self.updatedAt = updatedAt
-        self.coverThumbnail = coverThumbnail
+        self.coverThumbnailURL = coverThumbnailURL
         self.encryptedMetadata = encryptedMetadata
     }
 }

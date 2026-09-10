@@ -169,6 +169,9 @@ struct AlbumDetailView: View {
         }
         do {
             items = try await albums.photos(in: album.id)
+        } catch where error.isCancellation {
+            // Navigated away before the listing came back. Nothing to say about a request nobody
+            // is waiting for.
         } catch {
             // The grid stays on screen if there was one — a failed refresh is stale contents, not
             // an empty album, and blanking it would read as "everything was removed".

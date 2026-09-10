@@ -34,6 +34,7 @@ struct NeutrinoPhotosApp: App {
     @StateObject private var thumbnails: ThumbnailCache
     @StateObject private var deviceLibrary: DevicePhotoLibrary
     @StateObject private var keyFiles: KeyFileRouter
+    @StateObject private var keyProvisioning = KeyProvisioningService()
 
     /// The device's copy of the library. Optional because opening a database can fail — a full
     /// disk, a device the user has locked out of its own storage — and every consumer treats it as
@@ -119,6 +120,7 @@ struct NeutrinoPhotosApp: App {
                 .environmentObject(ledger)
                 .environmentObject(vault)
                 .environmentObject(devices)
+                .environmentObject(keyProvisioning)
                 .environmentObject(drive)
                 .environmentObject(thumbnails)
                 .environmentObject(deviceLibrary)
@@ -148,6 +150,9 @@ struct NeutrinoPhotosApp: App {
         // Idempotent: `.task` runs again if the scene is rebuilt, and this is a reference write.
         api.authService = authService
         KeyFileService.shared.authService = authService
+        // Minting a key and restoring one from a printed kit both talk to the account's key
+        // directory, so this needs the same token refresher as everything else.
+        keyProvisioning.authService = authService
 
         guard authService.isAuthenticated else { return }
 

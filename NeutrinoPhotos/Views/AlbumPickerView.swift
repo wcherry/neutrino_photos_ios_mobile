@@ -157,6 +157,8 @@ struct AlbumPickerView: View {
                     let failed = result.failures.count
                     error = "\(result.added.count) added. \(failed) couldn't be added."
                 }
+            } catch where error.isCancellation {
+                progress = nil
             } catch {
                 progress = nil
                 self.error = error.localizedDescription

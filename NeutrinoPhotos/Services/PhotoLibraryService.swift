@@ -163,6 +163,11 @@ final class PhotoLibraryService: ObservableObject {
             lastLoadedAt = Date()
             logger.debug("load succeeded: \(response.photos.count) items")
             try? await store?.replaceLibrary(with: merged)
+        } catch where error.isCancellation {
+            // Somebody navigated away, or an import started and re-keyed the refresh out from under
+            // this one. The timeline on screen is untouched and a fresh load is already coming, so
+            // there is nothing to tell the user.
+            logger.debug("load cancelled")
         } catch {
             logger.error("load failed: \(error, privacy: .public)")
             // A failed refresh over a library that is already on screen is a stale timeline, not an
@@ -180,6 +185,8 @@ final class PhotoLibraryService: ObservableObject {
             trashItems = response.photos
             logger.debug("loadTrash succeeded: \(response.photos.count) items")
             try? await store?.replaceTrash(with: response.photos)
+        } catch where error.isCancellation {
+            logger.debug("loadTrash cancelled")
         } catch {
             logger.error("loadTrash failed: \(error, privacy: .public)")
             self.error = error.localizedDescription
