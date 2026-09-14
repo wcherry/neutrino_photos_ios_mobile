@@ -49,9 +49,13 @@ final class PhotoLibraryServiceTests: XCTestCase {
         await sut.load()
 
         let query = MockURLProtocol.request { $0.url?.path.hasSuffix("/photos") == true }?.url?.query
-        // The server's parameter is misnamed: it means "include archived", and fetching everything
-        // once is what makes the Archive view and the Show Archived toggle free.
-        XCTAssertEqual(query, "archivedOnly=true")
+        // The server's parameter is misnamed: it means "include archived", and fetching them
+        // alongside everything else is what makes the Archive view and the Show Archived toggle
+        // free.
+        XCTAssertTrue(query?.contains("archivedOnly=true") == true, query ?? "nil")
+        // Bounded, which is the whole of issue #3: this listing carries every photo's metadata
+        // inline, so asking for a camera roll in one request is tens of megabytes.
+        XCTAssertTrue(query?.contains("limit=") == true, query ?? "nil")
     }
 
     func testLoadSendsTheBearerToken() async {
@@ -121,6 +125,66 @@ final class PhotoLibraryServiceTests: XCTestCase {
         XCTAssertTrue(message?.contains("network error") == true, message ?? "nil")
         XCTAssertTrue(message?.contains("\(URLError.Code.cannotParseResponse.rawValue)") == true,
                       "even the fallback has to be diagnosable")
+    }
+
+    // MARK: - Paging
+
+    /// Issue #3. The listing carries every photo's metadata inline, so a camera roll asked for in
+    /// one request is tens of megabytes and the phone times out waiting (-1001) on every refresh.
+    func testALibraryLargerThanOnePageIsWalkedInFull() async {
+        let photos = (0..<1250).map { Fixture.photoJSON(id: "p\($0)", fileID: "f\($0)") }
+        MockURLProtocol.respondWithPagedListing(photos)
+
+        await sut.load()
+
+        XCTAssertEqual(sut.allItems.count, 1250)
+        XCTAssertEqual(Set(sut.allItems.map(\.id)).count, 1250, "paging must not repeat a photo")
+        XCTAssertNil(sut.error)
+        XCTAssertGreaterThan(MockURLProtocol.requestCount, 1, "it should have taken several pages")
+    }
+
+    func testTheOrderTheServerSentIsPreservedAcrossPageBoundaries() async {
+        let photos = (0..<1100).map { Fixture.photoJSON(id: "p\($0)", fileID: "f\($0)") }
+        MockURLProtocol.respondWithPagedListing(photos)
+
+        await sut.load()
+
+        XCTAssertEqual(sut.allItems.map(\.id), (0..<1100).map { "p\($0)" })
+    }
+
+    /// A library that fits in one page must not cost a second request to discover that.
+    func testASmallLibraryTakesOneRequest() async {
+        MockURLProtocol.respondWithPagedListing([Fixture.photoJSON(id: "only")])
+
+        await sut.load()
+
+        XCTAssertEqual(sut.allItems.map(\.id), ["only"])
+        XCTAssertEqual(MockURLProtocol.requestCount, 1)
+    }
+
+    func testAnEmptyLibraryTakesOneRequestAndReportsNoError() async {
+        MockURLProtocol.respondWithPagedListing([])
+
+        await sut.load()
+
+        XCTAssertTrue(sut.allItems.isEmpty)
+        XCTAssertEqual(MockURLProtocol.requestCount, 1)
+        XCTAssertNil(sut.error)
+    }
+
+    /// A page that fails leaves the timeline as it was rather than half a library — the same
+    /// promise a failed single-request refresh made.
+    func testAFailedPageDoesNotLeaveAPartialLibraryOnScreen() async {
+        MockURLProtocol.respondWithPagedListing(
+            (0..<800).map { Fixture.photoJSON(id: "p\($0)", fileID: "f\($0)") })
+        await sut.load()
+        XCTAssertEqual(sut.allItems.count, 800)
+
+        MockURLProtocol.fail(with: .timedOut)
+        await sut.load()
+
+        XCTAssertEqual(sut.allItems.count, 800, "a failed refresh must not truncate the timeline")
+        XCTAssertNotNil(sut.error)
     }
 
     // MARK: - Coalescing

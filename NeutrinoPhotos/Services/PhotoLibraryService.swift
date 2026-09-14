@@ -149,8 +149,11 @@ final class PhotoLibraryService: ObservableObject {
     ///
     /// Note the query parameter's name. `archivedOnly=true` reads, in the handler, as
     /// `include_archived` — it *adds* archived photographs to the listing rather than restricting
-    /// it to them (`list_photos` in `src/photos/photos/repository.rs`). Everything is fetched once
-    /// and filtered on the device, so the Archive view and the Show Archived setting are both free.
+    /// it to them (`list_photos` in `src/photos/photos/repository.rs`). Archived items are fetched
+    /// alongside everything else and filtered on the device, so the Archive view and the Show
+    /// Archived setting are both free.
+    ///
+    /// The fetch itself is paged — see ``fetchEveryPage()``, which is where issue #3 was.
     func load() async {
         // Every launch asks for this listing twice — `ContentView` refreshes whenever an import
         // stops running, which includes the "not running" it starts in, and `LibraryView` refreshes
@@ -181,12 +184,11 @@ final class PhotoLibraryService: ObservableObject {
         defer { isLoading = false }
 
         do {
-            let response: APIListPhotosResponse =
-                try await api.get("/api/v1/photos?archivedOnly=true", decoder: Self.decoder)
-            let merged = mergingDeviceOnlyMetadata(into: response.photos)
+            let photos = try await fetchEveryPage()
+            let merged = mergingDeviceOnlyMetadata(into: photos)
             allItems = merged
             lastLoadedAt = Date()
-            logger.debug("load succeeded: \(response.photos.count) items")
+            logger.debug("load succeeded: \(photos.count) items")
             try? await store?.replaceLibrary(with: merged)
         } catch where error.isCancellation {
             // Somebody navigated away, or an import started and re-keyed the refresh out from under
@@ -202,6 +204,62 @@ final class PhotoLibraryService: ObservableObject {
             self.error = error.localizedDescription
         }
     }
+
+    /// Walks the listing a page at a time and answers the whole library.
+    ///
+    /// ## Why this is not one request any more
+    ///
+    /// It was, and that is what issue #3 turned out to be. The listing carries every photo's
+    /// metadata inline — roughly 800 bytes each — so a library the size of a camera roll is tens
+    /// of megabytes in a single response. A phone does not finish reading that before
+    /// `URLSession`'s sixty-second wait-for-data timer gives up, and the timeline showed a network
+    /// error over an empty grid on every refresh. The web client never met this because its
+    /// unfiltered listing goes through Drive's paged file endpoint and stops at 200 — which is the
+    /// page size this now uses too.
+    ///
+    /// Paging fixes it twice over. Each request is bounded, so no single one can stall past the
+    /// timeout; and the decode arrives in pages of ``pageSize`` with a suspension between them,
+    /// which is what stops a big library from freezing the main actor solid while it lands.
+    ///
+    /// ## Where it stops
+    ///
+    /// `total` is the library's count rather than the page's, so the loop ends when it has that
+    /// many. Two other conditions guard it, and neither is theoretical: a short page means the
+    /// server has run out regardless of what it counted, and ``maxPages`` stops a server whose
+    /// `total` disagrees with what it will actually hand over from spinning the phone forever.
+    private func fetchEveryPage() async throws -> [MediaItem] {
+        var photos: [MediaItem] = []
+
+        for page in 0..<Self.maxPages {
+            try Task.checkCancellation()
+            let offset = page * Self.pageSize
+            let response: APIListPhotosResponse = try await api.get(
+                "/api/v1/photos?archivedOnly=true&limit=\(Self.pageSize)&offset=\(offset)",
+                decoder: Self.decoder
+            )
+            photos.append(contentsOf: response.photos)
+
+            if response.photos.count < Self.pageSize || photos.count >= response.total {
+                return photos
+            }
+        }
+
+        logger.error("load stopped at \(Self.maxPages) pages: the server's total never ran out")
+        return photos
+    }
+
+    /// Photos per request — the same 200 the web client pages its own library by
+    /// (`LIBRARY_PAGE_SIZE` in `web/packages/api-photos`). One page is a couple of hundred
+    /// kilobytes, which lands well inside any timeout, and matching the web app means the two
+    /// clients put the same shape of load on the endpoint rather than each having its own idea of
+    /// what a page is. The server clamps anything above 1000, so this is comfortably under.
+    private static let pageSize = 200
+
+    /// A stop on the paging loop, not a limit on the library. Derived from ``pageSize`` rather
+    /// than written out, so changing the page size cannot quietly lower the ceiling: half a
+    /// million photographs is far past any real camera roll, and the point of the guard is that a
+    /// server which keeps answering full pages cannot hold the app in a loop that never ends.
+    private static let maxPages = 500_000 / pageSize
 
     func loadTrash() async {
         do {
