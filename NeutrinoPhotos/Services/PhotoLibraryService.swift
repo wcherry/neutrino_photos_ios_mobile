@@ -66,6 +66,9 @@ final class PhotoLibraryService: ObservableObject {
     private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "NeutrinoPhotos",
                                 category: "PhotoLibraryService")
 
+    /// The listing request in flight, so concurrent callers of ``load()`` share one — see there.
+    private var loadInFlight: Task<Void, Never>?
+
     /// No key-decoding strategy: the Photos endpoints already serialize camelCase
     /// (`#[serde(rename_all = "camelCase")]`). Timestamps arrive as RFC 3339 from `to_rfc3339()`,
     /// which `DriveDate` reads alongside Drive's zone-less shape.
@@ -149,6 +152,28 @@ final class PhotoLibraryService: ObservableObject {
     /// it to them (`list_photos` in `src/photos/photos/repository.rs`). Everything is fetched once
     /// and filtered on the device, so the Archive view and the Show Archived setting are both free.
     func load() async {
+        // Every launch asks for this listing twice — `ContentView` refreshes whenever an import
+        // stops running, which includes the "not running" it starts in, and `LibraryView` refreshes
+        // when it first appears — and a pull to refresh can land on top of either. All three want
+        // the same answer, so the later callers wait on the request already in flight instead of
+        // fetching a second copy of the whole library. On a camera roll that is megabytes of JSON
+        // and two passes of decoding, for one timeline.
+        if let existing = loadInFlight {
+            await existing.value
+            return
+        }
+        // Unstructured on purpose: the task outlives whichever caller started it, so a tab switch
+        // or an import beginning mid-flight no longer cancels a load the *other* caller is still
+        // waiting on. Cancellation from elsewhere is still handled — see the catch below.
+        let task = Task { @MainActor [weak self] in
+            await self?.performLoad()
+            self?.loadInFlight = nil
+        }
+        loadInFlight = task
+        await task.value
+    }
+
+    private func performLoad() async {
         await hydrateIfNeeded()
 
         isLoading = true

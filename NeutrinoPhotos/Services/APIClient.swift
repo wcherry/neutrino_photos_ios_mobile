@@ -15,11 +15,63 @@ enum APIError: LocalizedError {
     var errorDescription: String? {
         switch self {
         case .notAuthenticated:       return "You are not signed in."
-        case .network:                return "A network error occurred. Please check your connection."
+        case .network(let err):       return Self.describe(transport: err)
         case .server(let code):       return "Server error (\(code))."
         case .decoding(let err):      return "Failed to read server response: \(err.localizedDescription)"
         case .notFound:               return "That item is no longer available."
         }
+    }
+
+    /// What a transport failure actually was, in a sentence somebody can act on.
+    ///
+    /// Every one of these used to read "A network error occurred. Please check your connection."
+    /// — the same sentence whether the phone is in a tunnel, the server took a minute to answer,
+    /// or the TLS handshake was refused. Those have nothing in common except the layer they happen
+    /// at, and three of them are not something checking your connection will fix. The underlying
+    /// `URLError` has been carried in ``network(underlying:)`` since this type existed; this is
+    /// what reads it.
+    ///
+    /// **The numeric code is in the text on purpose.** A bug report arrives as a screenshot of a
+    /// banner, and `URLError` codes are the vocabulary this failure is actually discussed in — a
+    /// `-1005` in the corner of one separates "the connection dropped mid-response", which is a
+    /// server or proxy question, from `-1001` "the server never answered", which is a slow query.
+    /// Guessing between those from an unlabelled sentence is what issue #3 cost.
+    static func describe(transport error: Error) -> String {
+        guard let urlError = error as? URLError else {
+            return "The request could not be completed. \(error.localizedDescription)"
+        }
+        // Named rather than interpolated bare: `failingURL` is absent for failures that happen
+        // before a connection is attempted, and "could not be reached" is still the right sentence
+        // without it.
+        let server = urlError.failingURL?.host.map { " \($0)" } ?? ""
+
+        let reason: String
+        switch urlError.code {
+        case .notConnectedToInternet:
+            reason = "This device is offline. Please check your connection."
+        case .networkConnectionLost:
+            reason = "The connection dropped part-way through the response."
+        case .timedOut:
+            reason = "The server took too long to answer."
+        case .cannotFindHost, .dnsLookupFailed:
+            reason = "Could not find\(server)."
+        case .cannotConnectToHost:
+            reason = "Could not connect to\(server)."
+        case .dataNotAllowed:
+            reason = "Cellular data is turned off for this app."
+        case .internationalRoamingOff:
+            reason = "Data roaming is turned off."
+        case .secureConnectionFailed, .serverCertificateUntrusted, .serverCertificateHasBadDate,
+             .serverCertificateHasUnknownRoot, .serverCertificateNotYetValid:
+            reason = "The secure connection to\(server) failed."
+        case .appTransportSecurityRequiresSecureConnection:
+            reason = "That server must be reached over HTTPS."
+        case .unsupportedURL, .badURL:
+            reason = "The server address is not a valid URL. Check it in Settings."
+        default:
+            reason = "A network error occurred. Please check your connection."
+        }
+        return "\(reason) (\(urlError.code.rawValue))"
     }
 }
 
@@ -308,6 +360,14 @@ final class APIClient: ObservableObject {
         } catch let error as URLError where error.code == .cancelled {
             throw CancellationError()
         } catch {
+            // Logged here rather than left to the caller: every JSON request in the app funnels
+            // through this one `catch`, and the code is what a report of "connection error" needs
+            // and a banner alone has never carried.
+            logger.error("""
+                <-- transport failure \(request.url?.path ?? "?", privacy: .public): \
+                \((error as? URLError)?.code.rawValue ?? 0, privacy: .public) \
+                \(error.localizedDescription, privacy: .public)
+                """)
             throw APIError.network(underlying: error)
         }
         guard let http = response as? HTTPURLResponse else { throw APIError.server(statusCode: 0) }
