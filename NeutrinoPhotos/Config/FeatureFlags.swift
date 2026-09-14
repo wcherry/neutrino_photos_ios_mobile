@@ -61,6 +61,19 @@ enum FeatureFlags {
     /// It needs ``deviceLibraryAccess`` — there is no library to walk without it.
     static let fullLibraryImport: Bool = true
 
+    /// The device's own photo library, browsable as an album beside the account's: a grid of what is
+    /// on this iPhone, which of it is already backed up, and a selection that can be uploaded.
+    ///
+    /// Distinct from ``fullLibraryImport``, which is the unattended everything-at-once run, and from
+    /// ``importFromPhotos``, which is the system picker. This is the middle case the other two leave
+    /// out — *looking* at the roll from inside the app and choosing from it — and it is the only one
+    /// of the three that needs to enumerate the library in order to draw it, which is why it needs
+    /// ``deviceLibraryAccess`` and the picker does not.
+    ///
+    /// It reuses ``fullLibraryImport``'s queue to do the uploading, so a build with that flag off
+    /// has no route for the Upload button and this one does nothing on its own.
+    static let deviceLibraryAlbum: Bool = true
+
     /// Favorites — the photo record's `isStarred` flag, shared with the web app.
     static let favorites: Bool = true
 

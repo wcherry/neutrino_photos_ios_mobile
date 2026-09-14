@@ -33,6 +33,7 @@ struct NeutrinoPhotosApp: App {
     @StateObject private var drive: PhotosDriveService
     @StateObject private var thumbnails: ThumbnailCache
     @StateObject private var deviceLibrary: DevicePhotoLibrary
+    @StateObject private var deviceBrowser: DeviceLibraryBrowser
     @StateObject private var keyFiles: KeyFileRouter
     @StateObject private var keyProvisioning = KeyProvisioningService()
 
@@ -94,6 +95,11 @@ struct NeutrinoPhotosApp: App {
         _vault = StateObject(wrappedValue: vault)
         _devices = StateObject(wrappedValue: DeviceSessionService(api: api))
         _deviceLibrary = StateObject(wrappedValue: deviceLibrary)
+        // Built here rather than inside the screen that draws it, so the listing and its thumbnails
+        // survive navigating away from that screen and back — walking a fifty-thousand-item library
+        // is not something to redo because somebody tapped a tab. Nothing is fetched until the
+        // device album is first opened.
+        _deviceBrowser = StateObject(wrappedValue: DeviceLibraryBrowser(deviceLibrary: deviceLibrary))
         _importer = StateObject(wrappedValue: PhotoImportService(
             content: content, library: library, settings: settings, monitor: monitor, vault: vault,
             deviceLibrary: deviceLibrary, ledger: ledger
@@ -124,6 +130,7 @@ struct NeutrinoPhotosApp: App {
                 .environmentObject(drive)
                 .environmentObject(thumbnails)
                 .environmentObject(deviceLibrary)
+                .environmentObject(deviceBrowser)
                 .environmentObject(keyFiles)
                 .preferredColorScheme(settings.theme.colorScheme)
                 .task { await configure() }
@@ -194,6 +201,7 @@ private struct RootView: View {
     @EnvironmentObject private var library: PhotoLibraryService
     @EnvironmentObject private var content: MediaContentService
     @EnvironmentObject private var libraryImporter: LibraryImportService
+    @EnvironmentObject private var deviceBrowser: DeviceLibraryBrowser
 
     @State private var showsUnlock = false
     @State private var hasOfferedUnlock = false
@@ -240,6 +248,11 @@ private struct RootView: View {
                     await library.clearLocalCopy()
                     content.clearCache()
                 }
+                // Not the user's photographs leaking between accounts — the device library is the
+                // same roll whoever is signed in. It is the "already uploaded" marks drawn over it,
+                // which are read from a ledger that has just been emptied, plus a listing and tens
+                // of megabytes of thumbnails that nothing on the login screen is going to look at.
+                deviceBrowser.clear()
                 return
             }
             hasOfferedUnlock = false

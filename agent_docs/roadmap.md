@@ -656,11 +656,40 @@ Covers mvp.md §3 (full-library path), §19 items 4.
       forgetting it. `beginBackgroundTask` buys the seconds after a home-press so the item in flight
       finishes rather than being killed halfway. This is **not** background upload — that needs a
       background `URLSession` and is Epic 7.
+- [x] **The device library as an album, selectable and uploadable** *(added 2026-09-14, not in the
+      original scope)*
+      — `DeviceLibraryBrowser`, `DeviceLibraryView`, and a row at the foot of the Albums tab. This
+      is the case Epics 5 and 6 between them left out: the picker shows the roll but only *outside*
+      the app and hands back bytes, and the full-library run takes everything without showing any of
+      it. Neither answers "what is on this phone, and which of it is backed up?", which is the
+      question somebody asks before deciding to upload anything.
+
+      Three things are worth knowing about how it is built. **It reuses Epic 6's queue rather than
+      importing on its own**: `LibraryImportService.importSelected(_:)` writes the selection to
+      `import_queue` and starts a run, so de-duplication, RAW originals, Live Photo motion,
+      surviving a force-quit, the retry ladder and the Wi-Fi / storage / thermal conditions are all
+      inherited rather than written a third time. **The rows are prepended, not substituted** — see
+      `LocalStore.prependImportQueue(with:)`. `replaceImportQueue` is right for a scan, which owns
+      the queue, and catastrophic for a selection: somebody picking forty photographs has not asked
+      to discard the two thousand an interrupted run still has pending. Lower sort indices put the
+      selection in front, because the person who just tapped Upload is watching for *those* forty.
+      **Device album membership is deliberately not carried across**: reading it means walking every
+      album in the library, a cost a scan pays once and a forty-item selection should not pay at all.
+
+      Two performance shapes are load-bearing rather than incidental, both because this screen draws
+      an upload progress bar and therefore re-runs `body` several times a second while the thing it
+      started is running. `DeviceLibraryBrowser.revision` stands in for the listing wherever it
+      would otherwise be *compared* — 50,000 structs, on every view update — and
+      `DeviceLibraryFilter` memoizes the filtered grid on `(revision, ledger count, filter on)`, the
+      same bargain `TimelineCache` makes for the timeline and for the same reason. Measured: one
+      pass over 50,000 items is 52 ms, and every pass after it is 4 µs.
 
 **Flag:** `import` — spelled `importFromPhotos` and shared with Epic 5, plus **`fullLibraryImport`**
 for this epic's half, on the Epic 5 precedent: it is the path that asks for a permission and then
 does thousands of unattended uploads, and a build with it off is a working app whose import is
-exactly what the user picked in the picker.
+exactly what the user picked in the picker. **`deviceLibraryAlbum`** was added for the browsable
+album, on the same precedent again — it needs `deviceLibraryAccess` to enumerate the roll at all,
+and it has no route for its Upload button without `fullLibraryImport`'s queue behind it.
 
 **Status (2026-08-19):** all seven deliverables are implemented; **362 unit tests pass** (up from
 306). Three things are worth knowing:
@@ -701,6 +730,29 @@ exactly what the user picked in the picker.
 8. Watch thermals during a full import on device: sustained heavy import shouldn't push the
    phone into thermal throttling for more than a few minutes. If it does, add backpressure.
 9. Confirm album structure survived: a 3-album test library shows those 3 albums in Neutrino.
+
+**Manual verification — the device album** *(added 2026-09-14)*
+
+10. Albums tab → "On This iPhone" shows a count matching the Photos app, and opens onto a grid of
+    the roll with thumbnails drawn. Scroll the whole test library: no stalls, no blank cells left
+    behind.
+11. Tap 5 photos → the title reads "5 Selected" and the button reads "Upload 5 Items". Tap Upload →
+    they appear in the Neutrino library, and the cells come back marked as uploaded.
+12. Select the same 5 again and upload → nothing is added. The footer under the button should say so
+    *before* the tap, which is the ledger being read at selection time rather than at upload time.
+13. Turn on "Hide Already Uploaded" → those 5 disappear from the grid; turn it off → they come back,
+    dimmed with a cloud tick. Force-quit and reopen: the setting is still where it was left.
+14. Start a full-library import, then — while it runs — open the device album and upload 4 pictures.
+    The 4 must upload **next**, and the full-library run must still have its remaining items
+    afterwards. This is the property `prependImportQueue` exists for and the one most worth checking
+    on a device.
+15. Take a photograph in the Camera app with the device album open → it appears at the top of the
+    grid without a relaunch (`PHPhotoLibraryChangeObserver`).
+16. Deny photo access in Settings, reopen the album → an explanation and an Open Settings button, no
+    empty grid and no crash. Grant "Limited", reopen → only the shared subset, with "Select More
+    Photos…" offered in both the menu and the empty state.
+17. Upload a selection with the vault locked → the items queue and a banner says to unlock rather
+    than the tap doing nothing. Unlock → they upload.
 
 ---
 
