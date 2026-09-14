@@ -69,8 +69,8 @@ targets:
     info:
       path: NeutrinoPhotos/Info.plist
       properties:
-        CFBundleName: Neutrino Photos
-        CFBundleDisplayName: Neutrino Photos
+        CFBundleName: Photos
+        CFBundleDisplayName: Photos
         # Without these, xcodegen writes literal "1.0"/"1" into Info.plist and the
         # MARKETING_VERSION / CURRENT_PROJECT_VERSION build settings are ignored.
         CFBundleShortVersionString: "$(MARKETING_VERSION)"
