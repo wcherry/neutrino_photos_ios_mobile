@@ -101,7 +101,10 @@ final class TimelineSelectionTests: XCTestCase {
         var selection = TimelineSelection()
         selection.begin()
 
-        XCTAssertFalse(selection.coversAll(of: []))
+        // Spelled out rather than `[]`: the query is generic over anything with a `String` id now
+        // — the device-library album selects with the same type — so a bare empty literal has
+        // nothing to infer an element type from.
+        XCTAssertFalse(selection.coversAll(of: [MediaItem]()))
     }
 
     // MARK: - Resolving against the library

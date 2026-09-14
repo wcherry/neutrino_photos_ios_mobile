@@ -11,7 +11,7 @@ import Foundation
 /// hands back, and minutes of wall clock over a fifty-thousand-item library. A scan therefore reads
 /// only what `PHAsset` already has in hand, and the full record is fetched one item at a time, at
 /// the moment that item is actually imported.
-struct ScannedAsset: Equatable, Sendable {
+struct ScannedAsset: Identifiable, Equatable, Sendable {
 
     let localIdentifier: String
     let creationDate: Date?
@@ -20,6 +20,10 @@ struct ScannedAsset: Equatable, Sendable {
     let pixelHeight: Int
     /// Seconds, for a video; zero for a photograph.
     let duration: TimeInterval
+
+    /// The asset's identity in Apple Photos, which is also its identity everywhere this app puts it:
+    /// the import queue's primary key, the ledger's primary key, and what a grid cell selects.
+    var id: String { localIdentifier }
 
     init(localIdentifier: String, creationDate: Date?, isVideo: Bool,
          pixelWidth: Int, pixelHeight: Int, duration: TimeInterval) {

@@ -13,6 +13,14 @@ import Foundation
 /// It holds ids rather than items so it survives the library refreshing underneath it. An item
 /// deleted by another device mid-selection then simply drops out of the resolved set instead of
 /// leaving a phantom in the count — see ``resolve(in:)``, which is the only way the actions read it.
+///
+/// ## Why the queries are generic
+///
+/// Two grids select now: the timeline, over ``MediaItem``, and the device-library album, over
+/// ``ScannedAsset``. They select identically — tap to toggle, select-all, prune what has gone — and
+/// the only thing that differs is what the ids name. Everything above the id is therefore written
+/// once, against `Identifiable` with a `String` id, rather than copied into a second selection type
+/// whose first divergence would be a bulk action that addresses the wrong set.
 struct TimelineSelection: Equatable {
 
     // MARK: - Properties
@@ -34,14 +42,14 @@ struct TimelineSelection: Equatable {
     func contains(_ id: String) -> Bool { ids.contains(id) }
 
     /// The selected items, in the order the list gives them, skipping ids the library no longer has.
-    func resolve(in items: [MediaItem]) -> [MediaItem] {
+    func resolve<Item: Identifiable>(in items: [Item]) -> [Item] where Item.ID == String {
         items.filter { ids.contains($0.id) }
     }
 
     /// Whether every item on screen is selected — what decides whether the button offers
     /// "Select All" or "Deselect All". An empty list is not "all selected"; there is nothing to
     /// select, and offering to deselect it would be nonsense.
-    func coversAll(of items: [MediaItem]) -> Bool {
+    func coversAll<Item: Identifiable>(of items: [Item]) -> Bool where Item.ID == String {
         guard !items.isEmpty else { return false }
         return items.allSatisfy { ids.contains($0.id) }
     }
@@ -70,7 +78,7 @@ struct TimelineSelection: Equatable {
         }
     }
 
-    mutating func selectAll(in items: [MediaItem]) {
+    mutating func selectAll<Item: Identifiable>(in items: [Item]) where Item.ID == String {
         ids = Set(items.map(\.id))
     }
 
@@ -81,7 +89,7 @@ struct TimelineSelection: Equatable {
 
     /// Drops ids that are no longer in the library, so a bulk action taken after a sync cannot
     /// address something that has gone.
-    mutating func prune(against items: [MediaItem]) {
+    mutating func prune<Item: Identifiable>(against items: [Item]) where Item.ID == String {
         let live = Set(items.map(\.id))
         ids.formIntersection(live)
     }
