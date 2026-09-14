@@ -76,6 +76,78 @@ final class PhotoLibraryServiceTests: XCTestCase {
         XCTAssertNotNil(sut.error)
     }
 
+    // MARK: - What a transport failure says
+
+    /// Issue #3 arrived as a screenshot of a banner that read the same for every one of these, and
+    /// picking the cause out of it was guesswork. Each now names itself and carries its code.
+    func testTransportFailuresSayWhichOneHappened() async {
+        let cases: [(URLError.Code, String)] = [
+            (.notConnectedToInternet, "offline"),
+            (.timedOut, "too long"),
+            (.networkConnectionLost, "dropped"),
+            (.cannotFindHost, "Could not find"),
+            (.secureConnectionFailed, "secure connection"),
+        ]
+
+        for (code, fragment) in cases {
+            MockURLProtocol.fail(with: code)
+            await sut.load()
+
+            let message = try? XCTUnwrap(sut.error)
+            XCTAssertTrue(message?.contains(fragment) == true,
+                          "\(code.rawValue) should say \"\(fragment)\", said \(message ?? "nil")")
+            XCTAssertTrue(message?.contains("\(code.rawValue)") == true,
+                          "\(code.rawValue) should carry its code, said \(message ?? "nil")")
+        }
+    }
+
+    /// The host is the actionable half of "could not be reached": this app lets the user point it
+    /// at their own server, and a typo there is indistinguishable from an outage without it.
+    func testAFailureToReachTheServerNamesIt() async {
+        MockURLProtocol.fail(with: .cannotConnectToHost,
+                             url: URL(string: "https://photos.example.com/api/v1/photos")!)
+
+        await sut.load()
+
+        XCTAssertEqual(sut.error, "Could not connect to photos.example.com. (-1004)")
+    }
+
+    func testAnUnrecognisedTransportFailureStillReadsAsEnglish() async {
+        MockURLProtocol.fail(with: .cannotParseResponse)
+
+        await sut.load()
+
+        let message = try? XCTUnwrap(sut.error)
+        XCTAssertTrue(message?.contains("network error") == true, message ?? "nil")
+        XCTAssertTrue(message?.contains("\(URLError.Code.cannotParseResponse.rawValue)") == true,
+                      "even the fallback has to be diagnosable")
+    }
+
+    // MARK: - Coalescing
+
+    /// A launch fires this twice — `ContentView` on the import flag, `LibraryView` on appearance —
+    /// and both want the same listing. Fetching a whole camera roll's worth of JSON twice is what
+    /// that used to cost.
+    func testConcurrentLoadsShareOneRequest() async {
+        MockURLProtocol.respond(data: Fixture.listingJSON([Fixture.photoJSON(id: "a")]))
+
+        async let first: Void = sut.load()
+        async let second: Void = sut.load()
+        _ = await (first, second)
+
+        XCTAssertEqual(MockURLProtocol.requestCount, 1, "the second caller should wait, not refetch")
+        XCTAssertEqual(sut.allItems.map(\.id), ["a"])
+    }
+
+    func testASecondLoadAfterTheFirstFinishesStillFetches() async {
+        MockURLProtocol.respond(data: Fixture.listingJSON([Fixture.photoJSON(id: "a")]))
+        await sut.load()
+        await sut.load()
+
+        XCTAssertEqual(MockURLProtocol.requestCount, 2,
+                       "coalescing is for requests in flight, not a refresh the user asked for")
+    }
+
     // MARK: - Filtering
 
     func testArchivedItemsAreHiddenFromTheTimelineUnlessAskedFor() async {

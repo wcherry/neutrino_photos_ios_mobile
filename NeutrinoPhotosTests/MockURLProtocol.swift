@@ -53,6 +53,18 @@ final class MockURLProtocol: URLProtocol {
         }
     }
 
+    /// Fails every request at the transport layer, the way a real `URLSession` reports a phone in
+    /// a tunnel or a server that never answered — no response, no status code.
+    ///
+    /// The distinction the app now draws is between these codes, so a test asserting on the
+    /// message has to be able to pick one.
+    static func fail(with code: URLError.Code,
+                     url: URL = URL(string: "https://photos.test/api/v1/photos")!) {
+        handler = { _ in
+            throw URLError(code, userInfo: [NSURLErrorFailingURLErrorKey: url])
+        }
+    }
+
     /// Responds with raw bytes — for the content endpoints, whose bodies are ciphertext.
     static func respond(data: Data, statusCode: Int = 200) {
         handler = { request in

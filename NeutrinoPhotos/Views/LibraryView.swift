@@ -421,7 +421,18 @@ struct LibraryView: View {
             }
             lockedBanner
             if let error = library.error {
-                banner(error, systemImage: "wifi.exclamationmark", tint: .red)
+                // Tappable, which the plain banner was not. A refresh that failed leaves the only
+                // way back a pull on the grid — and the grid is empty in exactly the case the
+                // failure matters most, on a first launch that has nothing cached to pull on.
+                Button {
+                    Task { await library.load() }
+                } label: {
+                    banner(error, systemImage: "wifi.exclamationmark", tint: .red,
+                           accessory: library.isLoading ? .progress : .retry)
+                }
+                .buttonStyle(.plain)
+                .disabled(library.isLoading)
+                .accessibilityHint("Tap to try loading your library again.")
             }
         }
     }
@@ -560,14 +571,35 @@ struct LibraryView: View {
         .background(.bar)
     }
 
-    private func banner(_ text: String, systemImage: String, tint: Color) -> some View {
+    /// What a banner shows at its trailing edge, where it has something to offer.
+    private enum BannerAccessory {
+        case none, retry, progress
+    }
+
+    private func banner(_ text: String, systemImage: String, tint: Color,
+                        accessory: BannerAccessory = .none) -> some View {
         HStack(spacing: 8) {
             Image(systemName: systemImage)
                 .foregroundStyle(tint)
             Text(text)
                 .font(.footnote)
                 .foregroundStyle(.primary)
+                // Two lines: the transport failures now say which one happened, and several of
+                // those sentences do not fit a phone's width in one.
+                .lineLimit(2)
+                .multilineTextAlignment(.leading)
             Spacer()
+            switch accessory {
+            case .none:
+                EmptyView()
+            case .retry:
+                Image(systemName: "arrow.clockwise")
+                    .font(.footnote.weight(.semibold))
+                    .foregroundStyle(.tint)
+            case .progress:
+                ProgressView()
+                    .controlSize(.small)
+            }
         }
         .padding(.horizontal)
         .padding(.vertical, 8)
