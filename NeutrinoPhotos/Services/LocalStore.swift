@@ -491,6 +491,35 @@ actor LocalStore {
         }
     }
 
+    /// Adds items to the front of the queue, leaving everything already in it alone.
+    ///
+    /// This is what a hand-picked selection needs and ``replaceImportQueue(with:)`` cannot give it.
+    /// A scan owns the whole queue — it *is* the work list — but somebody who picked forty
+    /// photographs out of the device-library grid has not asked to discard the two thousand an
+    /// interrupted full-library run still has pending, and replacing the queue would do exactly
+    /// that, silently.
+    ///
+    /// "Front" is meant literally: the rows are given sort indices below the lowest one in the
+    /// table, so a run already in flight takes them next rather than after the rest of the library.
+    /// Somebody who just tapped Upload on forty pictures is watching for those forty.
+    ///
+    /// An item already in the queue is replaced rather than duplicated — `local_identifier` is the
+    /// primary key — so re-picking something that failed earlier retries it, with its attempt count
+    /// reset. Re-picking something already uploaded costs nothing either: the ledger check inside
+    /// the run skips it without reading a byte off disk.
+    func prependImportQueue(with items: [ImportQueueItem]) throws {
+        guard !items.isEmpty else { return }
+        try transaction {
+            // NULL on an empty table, which `scalar` reports as 0 — the right base either way.
+            let lowest = Self.scalar(database, "SELECT MIN(sort_index) FROM import_queue;") ?? 0
+            for (offset, item) in items.enumerated() {
+                var row = item
+                row.sortIndex = Int(lowest) - items.count + offset
+                try insert(row)
+            }
+        }
+    }
+
     private func insert(_ item: ImportQueueItem) throws {
         try run("""
                 INSERT OR REPLACE INTO import_queue

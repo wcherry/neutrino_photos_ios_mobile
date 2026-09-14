@@ -260,6 +260,67 @@ final class LibraryImportService: ObservableObject {
         start()
     }
 
+    // MARK: - A hand-picked selection
+
+    /// Queues exactly these items and starts uploading them — the Upload button on the
+    /// device-library grid.
+    ///
+    /// ## Why this is here rather than in ``PhotoImportService``
+    ///
+    /// The other importer's unit of work is a `PhotosPickerItem`, and the grid has none: it selects
+    /// out of a listing this app made, so what it has is a `PHAsset.localIdentifier`. Importing *by
+    /// identifier* is precisely what this service already does, item by item, in ``process(_:)`` —
+    /// and everything that hangs off it comes along unchanged: the ledger's duplicate check, the
+    /// RAW original rather than a rendering, a Live Photo's motion, the queue that survives the app
+    /// being killed, the retry passes, and the Wi-Fi / storage / heat conditions.
+    ///
+    /// A selection therefore differs from a full-library run in two things and nothing else: which
+    /// items are queued, and that they go to the front. Device album membership is deliberately not
+    /// carried across — reading it means walking every album in the library, which is a cost a scan
+    /// pays once and a forty-item selection should not pay at all.
+    ///
+    /// Safe while a full-library run is going: the rows are added to the queue rather than
+    /// replacing it, and the drain in flight picks them up next.
+    ///
+    /// - Returns: false when nothing could be queued, with ``phase`` carrying the reason.
+    @discardableResult
+    func importSelected(_ assets: [ScannedAsset]) async -> Bool {
+        guard FeatureFlags.fullLibraryImport, !assets.isEmpty else { return false }
+        guard let store else {
+            phase = .paused("This device's library index is unavailable. Import with the photo picker instead.")
+            return false
+        }
+        guard deviceLibrary.access.isUsable else {
+            phase = .paused("Neutrino Photos needs access to your photo library to upload from it.")
+            return false
+        }
+
+        await ledger.hydrate()
+        // Ordered as the grid ordered them — newest first — so the sort indices this writes put
+        // them back in that order, and an upload stopped halfway has sent the recent ones.
+        let queued = assets.enumerated().map { index, asset in
+            ImportQueueItem(localIdentifier: asset.localIdentifier,
+                            sortIndex: index,
+                            isVideo: asset.isVideo,
+                            estimatedBytes: ImportSizeEstimate.bytes(for: asset))
+        }
+
+        do {
+            try await store.prependImportQueue(with: queued)
+        } catch {
+            logger.error("could not queue a selection: \(error, privacy: .public)")
+            phase = .paused(error.localizedDescription)
+            return false
+        }
+
+        await refreshCounts()
+        // A no-op while a run is already draining — `start()` refuses a second one — and the rows
+        // just written are the next it will take.
+        start()
+        logger.debug("queued \(queued.count) hand-picked item(s)")
+        return true
+    }
+
     // MARK: - Running
 
     func start() {
