@@ -52,6 +52,7 @@ final class AppSettings: ObservableObject {
         static let wifiOnlyUploads  = "settings.wifiOnlyUploads"
         static let publishesLocation = "settings.publishesLocation"
         static let importsLiveMotion = "settings.importsLiveMotion"
+        static let hidesUploadedDeviceItems = "settings.hidesUploadedDeviceItems"
     }
 
     // MARK: - Published settings
@@ -103,6 +104,16 @@ final class AppSettings: ObservableObject {
         didSet { defaults.set(importsLivePhotoMotion, forKey: Keys.importsLiveMotion) }
     }
 
+    /// Whether the device-library album hides items this device has already uploaded.
+    ///
+    /// Off by default, so the album is what its title says — the photos on this iPhone — rather than
+    /// a filtered view somebody has to work out the rule of. Turning it on is what makes the album a
+    /// worklist: everything left on screen is something that is not yet backed up. Both readings are
+    /// legitimate, which is why it is a switch and not a decision made here.
+    @Published var hidesUploadedDeviceItems: Bool {
+        didSet { defaults.set(hidesUploadedDeviceItems, forKey: Keys.hidesUploadedDeviceItems) }
+    }
+
     // MARK: - Private
 
     private let defaults: UserDefaults
@@ -126,6 +137,8 @@ final class AppSettings: ObservableObject {
             defaults.object(forKey: Keys.publishesLocation) as? Bool ?? false
         self.importsLivePhotoMotion =
             defaults.object(forKey: Keys.importsLiveMotion) as? Bool ?? true
+        self.hidesUploadedDeviceItems =
+            defaults.object(forKey: Keys.hidesUploadedDeviceItems) as? Bool ?? false
     }
 
     // MARK: - Reset
@@ -137,5 +150,6 @@ final class AppSettings: ObservableObject {
         wifiOnlyUploads = true
         publishesLocationMetadata = false
         importsLivePhotoMotion = true
+        hidesUploadedDeviceItems = false
     }
 }

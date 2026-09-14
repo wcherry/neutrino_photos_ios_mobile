@@ -19,6 +19,9 @@ struct AlbumsView: View {
 
     @EnvironmentObject private var albums: AlbumService
     @EnvironmentObject private var library: PhotoLibraryService
+    /// Read for the device album's count, and refreshed here so the row is right before it is
+    /// tapped rather than after.
+    @EnvironmentObject private var deviceLibrary: DevicePhotoLibrary
 
     @State private var newAlbumTitle = ""
     @State private var showsNewAlbum = false
@@ -56,7 +59,16 @@ struct AlbumsView: View {
             }
         }
         .refreshable { await albums.load() }
-        .task { await albums.load() }
+        .task {
+            await albums.load()
+            if FeatureFlags.deviceLibraryAlbum {
+                // Re-read rather than trusted: photo permission is changed in Settings and iOS does
+                // not tell an app it happened, so a count cached from a grant that has since been
+                // revoked would sit on the row saying 2,431.
+                deviceLibrary.refresh()
+                deviceLibrary.refreshItemCount()
+            }
+        }
         .alert("New Album", isPresented: $showsNewAlbum) {
             TextField("Name", text: $newAlbumTitle)
             Button("Cancel", role: .cancel) {}
@@ -110,10 +122,51 @@ struct AlbumsView: View {
                 divider
                 collectionRow(.trash, count: library.trashItems.count)
             }
+            if FeatureFlags.deviceLibraryAlbum && FeatureFlags.deviceLibraryAccess {
+                divider
+                deviceLibraryRow
+            }
         }
         .background(Color(.secondarySystemGroupedBackground))
         .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
         .padding(.horizontal)
+    }
+
+    /// The photos on this iPhone.
+    ///
+    /// Last in the list, and after a divider like the rest, because it is the one collection here
+    /// that is not in the account — everything above it is a view over photographs Neutrino already
+    /// holds, and this is the one that is still outside. Its trailing value says which of those two
+    /// it is on any given device: a count once the library can be read, and the reason it cannot
+    /// when it cannot, since a bare "0" would read as an empty phone rather than as a closed door.
+    private var deviceLibraryRow: some View {
+        NavigationLink {
+            DeviceLibraryView()
+        } label: {
+            HStack(spacing: 12) {
+                Image(systemName: "iphone")
+                    .font(.body)
+                    .foregroundStyle(.tint)
+                    .frame(width: 28)
+                Text("On This iPhone")
+                    .foregroundStyle(.primary)
+                Spacer()
+                Text(deviceLibraryDetail)
+                    .foregroundStyle(.secondary)
+                Image(systemName: "chevron.right")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.tertiary)
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 11)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+    }
+
+    private var deviceLibraryDetail: String {
+        guard deviceLibrary.access.isUsable else { return deviceLibrary.access.displayName }
+        return deviceLibrary.itemCount.map(String.init) ?? "—"
     }
 
     private var divider: some View {
