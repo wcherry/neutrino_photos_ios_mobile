@@ -474,6 +474,91 @@ final class LibraryImportServiceTests: XCTestCase {
         XCTAssertNotNil(LibraryImportService.freeDiskBytes())
     }
 
+    // MARK: - Stopping without saying so
+
+    func testAStopTheUserDidNotAskForExplainsItself() async throws {
+        // The failure this closes: the background assertion expires, the run stops, and `.paused(nil)`
+        // draws no banner anywhere — so somebody who glanced at another app comes back to an upload
+        // that is making no progress and says nothing about why.
+        TestKeys.install()
+        monitor.setPathForTesting(isOnline: true, isExpensive: false)
+        let store = try makeStore()
+        try await store.replaceImportQueue(with: items(5))
+        let sut = makeService(store: store)
+        await sut.restore()
+        sut.start()
+
+        sut.pauseForBackgrounding()
+
+        XCTAssertEqual(sut.phase, .paused(LibraryImportService.backgroundedReason))
+    }
+
+    func testAnImportIOSStoppedCarriesOnWhenTheAppComesBack() async throws {
+        // An import only runs in the foreground, so without this one look at another app ends a
+        // twenty-thousand-item upload permanently.
+        TestKeys.install()
+        monitor.setPathForTesting(isOnline: true, isExpensive: false)
+        let store = try makeStore()
+        try await store.replaceImportQueue(with: items(5))
+        let sut = makeService(store: store)
+        await sut.restore()
+        sut.start()
+        sut.pauseForBackgrounding()
+
+        sut.resumeIfBackgrounded()
+
+        XCTAssertEqual(sut.phase, .running)
+    }
+
+    func testAnImportTheUserPausedStaysPaused() async throws {
+        // The other half of the same rule: coming back to the app must not undo a deliberate Pause.
+        TestKeys.install()
+        monitor.setPathForTesting(isOnline: true, isExpensive: false)
+        let store = try makeStore()
+        try await store.replaceImportQueue(with: items(5))
+        let sut = makeService(store: store)
+        await sut.restore()
+        sut.start()
+        sut.pause()
+
+        sut.resumeIfBackgrounded()
+
+        XCTAssertEqual(sut.phase, .paused(nil))
+    }
+
+    func testPausingSaysWhetherThereWasAnythingToPause() async throws {
+        // What tells `pauseForBackgrounding()` not to remember a run that was already stopped —
+        // otherwise the next return to the foreground would start an upload nobody asked for.
+        TestKeys.install()
+        monitor.setPathForTesting(isOnline: true, isExpensive: false)
+        let store = try makeStore()
+        try await store.replaceImportQueue(with: items(5))
+        let sut = makeService(store: store)
+        await sut.restore()
+
+        XCTAssertFalse(sut.pause(), "nothing was running")
+        sut.start()
+        XCTAssertTrue(sut.pause())
+    }
+
+    func testABackgroundedPauseOverAStoppedRunIsNotResumedLater() async throws {
+        TestKeys.install()
+        monitor.setPathForTesting(isOnline: true, isExpensive: false)
+        let store = try makeStore()
+        try await store.replaceImportQueue(with: items(5))
+        let sut = makeService(store: store)
+        await sut.restore()
+        sut.start()
+        sut.pause()
+
+        // The assertion expires after the user has already paused: there is no run to stop, and
+        // nothing to carry on later.
+        sut.pauseForBackgrounding()
+        sut.resumeIfBackgrounded()
+
+        XCTAssertEqual(sut.phase, .paused(nil))
+    }
+
     // MARK: - Estimates
 
     func testNoTimeIsEstimatedWhileTheImportIsNotRunning() async throws {
