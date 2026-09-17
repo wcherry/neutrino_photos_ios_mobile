@@ -214,12 +214,9 @@ final class PhotosDriveService: ObservableObject {
             return stored
         }
 
-        let root = try driveRootID()
-        let contents: APIFolderContents = try await api.get("/api/v1/drive/folders/\(root)",
-                                                            decoder: Self.decoder)
-        if let existing = contents.folders.first(where: { $0.name == name }) {
-            await rememberFolder(existing.id, as: key)
-            return existing.id
+        if let existing = try await findFolder(named: name) {
+            await rememberFolder(existing, as: key)
+            return existing
         }
         guard creatingIfNeeded else { return nil }
 
@@ -231,6 +228,53 @@ final class PhotosDriveService: ObservableObject {
         await rememberFolder(created.id, as: key)
         return created.id
     }
+
+    /// Looks for one of this app's folders among the root's subfolders, a page at a time.
+    ///
+    /// ## Why this is paged for a question about *folders*
+    ///
+    /// Because the endpoint that answers it also returns the root's **files**, and with no `limit`
+    /// the server reads that as `i64::MAX` (`SqlPage::from_query`). Every photograph this app
+    /// uploads lands in the Drive root, so asking this question unpaged on an account with a
+    /// camera roll in it means pulling every file in the account — id, name, mime type, timestamps
+    /// and `encryptedMetadata` per row — to find a folder by name.
+    ///
+    /// That is issue #3 again, in the *upload* path rather than the listing one: the request was
+    /// the first thing an import did after sending a photograph's bytes (via
+    /// ``renditionsFolderID(creatingIfNeeded:)``), it took minutes or timed out on a large
+    /// account, and because it happens before the queue row is marked done the whole import sat at
+    /// "0 of N" with nothing failing and so nothing logged. The decode made it worse: `APIClient`
+    /// is `@MainActor`, so tens of megabytes of JSON were parsed on the thread drawing the
+    /// progress bar.
+    ///
+    /// `limit` applies to the folder query and the file query separately — see
+    /// `list_subfolders` and `list_files_in_folder` — so a page of 200 bounds both. For any real
+    /// account this is one request that stops at the first page.
+    private func findFolder(named name: String) async throws -> String? {
+        let root = try driveRootID()
+        for page in 0..<Self.maxFolderPages {
+            let path = """
+                /api/v1/drive/folders/\(root)?limit=\(Self.folderPageSize)\
+                &offset=\(page * Self.folderPageSize)
+                """
+            let contents: APIFolderContents = try await api.get(path, decoder: Self.decoder)
+            if let match = contents.folders.first(where: { $0.name == name }) { return match.id }
+            // A short page means the subfolders have run out, whatever the files did.
+            if contents.folders.count < Self.folderPageSize { return nil }
+        }
+        // Answering nil here would make the caller create a second folder of the same name, so say
+        // so: ten thousand folders in one Drive root is a broken account rather than a big one.
+        logger.error("gave up looking for the \(name, privacy: .public) folder after \(Self.maxFolderPages) pages")
+        return nil
+    }
+
+    /// Subfolders per page while resolving one by name — the same 200 the photo listing pages by,
+    /// so the two put the same shape of load on the server.
+    private static let folderPageSize = 200
+
+    /// A stop on the walk, not a limit on the account: a server that keeps answering full pages
+    /// must not be able to hold an import in a loop that never ends.
+    private static let maxFolderPages = 50
 
     /// Reads the renditions folder and records what is in it: original file id → rendition file id.
     ///

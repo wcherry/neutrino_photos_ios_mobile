@@ -215,6 +215,63 @@ final class PhotosDriveServiceTests: XCTestCase {
             .contains(PhotosDriveService.livePhotosFolderName))
     }
 
+    // MARK: - Resolving a folder without pulling the whole account
+
+    func testTheFolderLookupAsksForABoundedPage() async throws {
+        // The regression this pins. `GET /drive/folders/{root}` with no `limit` is
+        // `LIMIT i64::MAX` server-side, and every photograph this app uploads lands in the root —
+        // so the unpaged version of this request was the whole account's file list, fetched in the
+        // middle of an import to find a folder *by name*. It ran after the bytes were sent and
+        // before the queue row was marked done, so the import sat at "0 of N" for minutes with
+        // nothing failing and therefore nothing logged.
+        MockURLProtocol.respond(json: Self.folderJSON(folders: [
+            Self.folderEntryJSON(id: "renditions", name: PhotosDriveService.renditionsFolderName),
+        ]))
+
+        _ = try await sut.renditionsFolderID()
+
+        let query = try XCTUnwrap(MockURLProtocol.lastRequest?.url?.query)
+        XCTAssertTrue(query.contains("limit=200"), "an unbounded root listing is the whole account")
+        XCTAssertTrue(query.contains("offset=0"))
+    }
+
+    func testTheFolderLookupWalksPastAFullPageOfFolders() async throws {
+        // `limit` bounds the folders as well as the files, so a bounded request has to be able to
+        // page — otherwise an account with more root folders than one page would never find this
+        // app's own folder, and would make a second one beside it on every device.
+        let filler = (0..<200).map { Self.folderEntryJSON(id: "f\($0)", name: "Folder \($0)") }
+        MockURLProtocol.respondInSequence([
+            (json: Self.folderJSON(folders: filler), statusCode: 200),
+            (json: Self.folderJSON(folders: [
+                Self.folderEntryJSON(id: "renditions",
+                                     name: PhotosDriveService.renditionsFolderName),
+            ]), statusCode: 200),
+        ])
+
+        let folderID = try await sut.renditionsFolderID()
+
+        XCTAssertEqual(folderID, "renditions")
+        XCTAssertEqual(MockURLProtocol.requestCount, 2)
+        XCTAssertTrue(try XCTUnwrap(MockURLProtocol.lastRequest?.url?.query).contains("offset=200"))
+        XCTAssertNil(MockURLProtocol.request { $0.httpMethod == "POST" },
+                     "the folder was found, so nothing should have been created")
+    }
+
+    func testTheFolderLookupStopsAtAShortPage() async throws {
+        // A page that is not full means the subfolders have run out, whatever the files did — so
+        // an account with no such folder costs exactly one request before it is created.
+        MockURLProtocol.route([
+            ("/drive/folders/\(TestTokens.userId)", 200, Data(Self.folderJSON().utf8)),
+            ("/drive/folders", 201, Data(Self.folderEntryJSON(
+                id: "made", name: PhotosDriveService.renditionsFolderName).utf8)),
+        ])
+
+        let folderID = try await sut.renditionsFolderID()
+
+        XCTAssertEqual(folderID, "made")
+        XCTAssertEqual(MockURLProtocol.requestCount, 2, "one listing, then the create")
+    }
+
     // MARK: - Rendition index
 
     func testBuildsTheRenditionIndexFromTheFileNames() async throws {
