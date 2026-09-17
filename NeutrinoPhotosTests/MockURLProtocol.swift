@@ -71,7 +71,13 @@ final class MockURLProtocol: URLProtocol {
     /// A closure over the whole set rather than a canned list of pages, so a test says how big the
     /// library is and the client decides how to walk it.
     static func respondWithPagedListing(_ photos: [String]) {
-        handler = { request in
+        handler = handlerForPagedListing(photos)
+    }
+
+    /// The paged responder on its own, for a test that wants to serve some pages and do something
+    /// else with the others — failing everything past the first, say.
+    static func handlerForPagedListing(_ photos: [String]) -> (URLRequest) throws -> (HTTPURLResponse, Data) {
+        { request in
             let items = URLComponents(url: request.url!, resolvingAgainstBaseURL: false)?
                 .queryItems ?? []
             let value = { (name: String) in items.first { $0.name == name }?.value.flatMap(Int.init) }

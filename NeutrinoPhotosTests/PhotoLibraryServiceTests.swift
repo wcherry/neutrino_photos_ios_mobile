@@ -18,6 +18,10 @@ final class PhotoLibraryServiceTests: XCTestCase {
     }
 
     override func tearDown() {
+        // First, and before the stub goes: a test that only waited for the first page leaves the
+        // rest of the library still arriving, and a walk that outlived its test would go on making
+        // requests against the next one's stub.
+        sut.cancelFill()
         MockURLProtocol.reset()
         TestTokens.remove()
         TestServer.reset()
@@ -135,7 +139,7 @@ final class PhotoLibraryServiceTests: XCTestCase {
         let photos = (0..<1250).map { Fixture.photoJSON(id: "p\($0)", fileID: "f\($0)") }
         MockURLProtocol.respondWithPagedListing(photos)
 
-        await sut.load()
+        await sut.loadEverything()
 
         XCTAssertEqual(sut.allItems.count, 1250)
         XCTAssertEqual(Set(sut.allItems.map(\.id)).count, 1250, "paging must not repeat a photo")
@@ -147,9 +151,122 @@ final class PhotoLibraryServiceTests: XCTestCase {
         let photos = (0..<1100).map { Fixture.photoJSON(id: "p\($0)", fileID: "f\($0)") }
         MockURLProtocol.respondWithPagedListing(photos)
 
-        await sut.load()
+        await sut.loadEverything()
 
         XCTAssertEqual(sut.allItems.map(\.id), (0..<1100).map { "p\($0)" })
+    }
+
+    // MARK: - First page, then the rest
+
+    /// The point of the change. A 25,000 photo library used to cost 125 requests before the grid
+    /// had anything in it; the reader now waits for one.
+    func testLoadPaintsTheTimelineAfterASinglePage() async {
+        let photos = (0..<25_000).map { Fixture.photoJSON(id: "p\($0)", fileID: "f\($0)") }
+        MockURLProtocol.respondWithPagedListing(photos)
+
+        await sut.load()
+
+        XCTAssertEqual(MockURLProtocol.requestCount, 1, "the reader waited on more than one request")
+        XCTAssertEqual(sut.allItems.count, 200, "a page should be on screen")
+        XCTAssertFalse(sut.isLoading, "the grid is usable, so nothing should still read as loading")
+        XCTAssertEqual(sut.libraryTotal, 25_000, "the whole library's count, not the page's")
+    }
+
+    /// Nothing is given up by showing the first page early: the walk still runs to the end, so the
+    /// collections, the counts and the scrubber end up working from the whole library as before.
+    func testTheRestOfTheLibraryArrivesBehindTheFirstPage() async {
+        let photos = (0..<1000).map { Fixture.photoJSON(id: "p\($0)", fileID: "f\($0)") }
+        MockURLProtocol.respondWithPagedListing(photos)
+
+        await sut.load()
+        XCTAssertEqual(sut.allItems.count, 200)
+
+        await sut.loadEverything()
+
+        XCTAssertEqual(sut.allItems.map(\.id), (0..<1000).map { "p\($0)" })
+        XCTAssertFalse(sut.isFillingIn, "the fill should have finished")
+        XCTAssertNil(sut.error)
+    }
+
+    /// Paging and sorting are one decision: `LIMIT`/`OFFSET` cuts along whatever the server sorted
+    /// by, so a client that displays photos by capture date has to page by it too. Asking in
+    /// arrival order would make each page an arbitrary slice of the timeline, and the fill would
+    /// keep inserting rows above where the reader is looking.
+    func testThePagesAreAskedForInTheOrderTheTimelineDisplays() async {
+        MockURLProtocol.respondWithPagedListing([Fixture.photoJSON(id: "only")])
+
+        await sut.load()
+
+        let query = MockURLProtocol.request { $0.url?.path.hasSuffix("/photos") == true }?.url?.query
+        XCTAssertTrue(query?.contains("orderBy=captureDate") == true, query ?? "nil")
+    }
+
+    /// Offset paging over a library somebody is still adding to can hand back a photo twice: an
+    /// insert above the frontier shifts every later row down one. The grid must not show it twice.
+    func testAPhotoHandedBackOnTwoPagesLandsInTheTimelineOnce() async {
+        // The server repeats `p199` as the first row of the second page, which is what an insert
+        // during the walk looks like from here.
+        var pages = (0..<200).map { Fixture.photoJSON(id: "p\($0)", fileID: "f\($0)") }
+        pages += [Fixture.photoJSON(id: "p199", fileID: "f199")]
+        pages += (200..<260).map { Fixture.photoJSON(id: "p\($0)", fileID: "f\($0)") }
+        MockURLProtocol.respondWithPagedListing(pages)
+
+        await sut.loadEverything()
+
+        XCTAssertEqual(Set(sut.allItems.map(\.id)).count, sut.allItems.count,
+                       "a repeated photo reached the timeline twice")
+        XCTAssertEqual(sut.allItems.filter { $0.id == "p199" }.count, 1)
+    }
+
+    /// A fill that dies partway leaves a usable timeline rather than an empty grid — that part of
+    /// issue #3 stays fixed — but it must still say so, because every count in the app is a
+    /// fraction until the walk finishes and there is no way for the reader to spot that alone.
+    func testAFailedFillKeepsTheFirstPageAndReportsIt() async {
+        let photos = (0..<1000).map { Fixture.photoJSON(id: "p\($0)", fileID: "f\($0)") }
+        let paged = MockURLProtocol.handlerForPagedListing(photos)
+        MockURLProtocol.handler = { request in
+            let offset = URLComponents(url: request.url!, resolvingAgainstBaseURL: false)?
+                .queryItems?.first { $0.name == "offset" }?.value.flatMap(Int.init) ?? 0
+            if offset > 0 { throw URLError(.timedOut) }
+            return try paged(request)
+        }
+
+        await sut.loadEverything()
+
+        XCTAssertEqual(sut.allItems.count, 200, "the first page should still be on screen")
+        XCTAssertNotNil(sut.error, "an incomplete library has to be reported")
+        XCTAssertFalse(sut.isFillingIn)
+    }
+
+    /// A refresh over a timeline that is already on screen assembles off-screen and swaps in at the
+    /// end. Truncating a full timeline to two hundred rows to refill it would be a visible collapse
+    /// under the reader's thumb.
+    func testARefreshNeverShrinksTheTimelineOnItsWayBackUp() async {
+        let photos = (0..<1000).map { Fixture.photoJSON(id: "p\($0)", fileID: "f\($0)") }
+        MockURLProtocol.respondWithPagedListing(photos)
+        await sut.loadEverything()
+        XCTAssertEqual(sut.allItems.count, 1000)
+
+        await sut.load()
+
+        XCTAssertEqual(sut.allItems.count, 1000,
+                       "the refresh's first page must not replace the library with itself")
+    }
+
+    /// A walk that finishes is authoritative, and that is what takes a photo deleted on another
+    /// device off this one.
+    func testACompletedRefreshDropsWhatTheServerNoLongerLists() async {
+        MockURLProtocol.respondWithPagedListing(
+            (0..<300).map { Fixture.photoJSON(id: "p\($0)", fileID: "f\($0)") })
+        await sut.loadEverything()
+        XCTAssertEqual(sut.allItems.count, 300)
+
+        MockURLProtocol.respondWithPagedListing(
+            (0..<250).map { Fixture.photoJSON(id: "p\($0)", fileID: "f\($0)") })
+        await sut.loadEverything()
+
+        XCTAssertEqual(sut.allItems.count, 250)
+        XCTAssertNil(sut.item(id: "p299"), "a photo the server dropped should be gone")
     }
 
     /// A library that fits in one page must not cost a second request to discover that.
@@ -177,11 +294,11 @@ final class PhotoLibraryServiceTests: XCTestCase {
     func testAFailedPageDoesNotLeaveAPartialLibraryOnScreen() async {
         MockURLProtocol.respondWithPagedListing(
             (0..<800).map { Fixture.photoJSON(id: "p\($0)", fileID: "f\($0)") })
-        await sut.load()
+        await sut.loadEverything()
         XCTAssertEqual(sut.allItems.count, 800)
 
         MockURLProtocol.fail(with: .timedOut)
-        await sut.load()
+        await sut.loadEverything()
 
         XCTAssertEqual(sut.allItems.count, 800, "a failed refresh must not truncate the timeline")
         XCTAssertNotNil(sut.error)
