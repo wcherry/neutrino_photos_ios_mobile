@@ -150,10 +150,13 @@ struct LibraryImportView: View {
                             .foregroundStyle(.secondary)
                     }
                 }
-                if let name = importer.currentName, importer.isBusy {
+                // Keyed on the activity rather than on the name, because the first half of an item
+                // has no name yet: fetching an original out of Apple Photos can be a long iCloud
+                // download, and that is exactly the stretch this bar has to cover.
+                if let activity = importer.currentActivity, importer.isBusy {
                     ProgressView(value: importer.currentFraction)
                         .tint(.secondary)
-                    Text(name)
+                    Text(importer.currentName ?? activity)
                         .font(.caption2)
                         .foregroundStyle(.secondary)
                         .lineLimit(1)

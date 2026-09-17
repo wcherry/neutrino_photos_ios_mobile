@@ -325,6 +325,14 @@ struct DeviceLibraryView: View {
                         .font(.caption2)
                         .foregroundStyle(.secondary)
                         .lineLimit(2)
+                } else if let activity = importer.currentActivity {
+                    // The overall bar moves once per item, and an item can be minutes long when its
+                    // original has to come down from iCloud. Without this line those minutes look
+                    // like a stalled upload.
+                    Text(activity)
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
                 }
             }
             .padding(.horizontal)

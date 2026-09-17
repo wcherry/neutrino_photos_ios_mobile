@@ -140,6 +140,11 @@ struct NeutrinoPhotosApp: App {
                 .onChange(of: scenePhase) { phase in
                     guard phase == .active else { return }
                     deviceLibrary.refresh()
+                    // An import only runs in the foreground — the background assertion buys the
+                    // seconds after a home-press and no more — so iOS stops one every time the user
+                    // looks at another app. Carrying on here is what keeps that from ending the
+                    // upload for good, silently; a run the user paused themselves is left alone.
+                    libraryImporter.resumeIfBackgrounded()
                 }
                 .onOpenURL { url in
                     // A `.json` key file AirDropped or tapped in Files. Declaring the document type

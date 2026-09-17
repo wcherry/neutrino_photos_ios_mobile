@@ -66,6 +66,13 @@ final class LibraryImportService: ObservableObject {
     @Published private(set) var currentName: String?
     /// Fraction of the item in flight, 0 to 1.
     @Published private(set) var currentFraction: Double = 0
+    /// What is being done to the item in flight, when that is worth saying.
+    ///
+    /// There are two stages and only one of them is an upload. Fetching an original out of Apple
+    /// Photos is instant for an item that is on the phone and a multi-minute iCloud download for one
+    /// that is not — and a bar that reads "uploading" while it waits on iCloud is a bar that looks
+    /// broken, because the network it names is not the one being waited on.
+    @Published private(set) var currentActivity: String?
     /// The most recent failures, for the list the user can retry from.
     @Published private(set) var failures: [ImportQueueItem] = []
     /// When a run last drained the queue to nothing.
@@ -125,6 +132,15 @@ final class LibraryImportService: ObservableObject {
                                 category: "LibraryImportService")
 
     private var runTask: Task<Void, Never>?
+
+    /// Set when iOS took the app away mid-run rather than when the user pressed Pause.
+    ///
+    /// The two are the same stop and must not be the same resume. A run the user paused stays
+    /// paused; a run that stopped because the background assertion expired is one they never asked
+    /// to stop, and leaving it there is how an upload started from the device-library grid ends up
+    /// making no progress at all — the user backgrounds the app for thirty seconds, comes back, and
+    /// nothing is running.
+    private var wasPausedByBackgrounding = false
 
     /// Which run is the current one.
     ///
@@ -317,7 +333,16 @@ final class LibraryImportService: ObservableObject {
         // A no-op while a run is already draining — `start()` refuses a second one — and the rows
         // just written are the next it will take.
         start()
-        logger.debug("queued \(queued.count) hand-picked item(s)")
+        logger.notice("queued \(queued.count) hand-picked item(s)")
+        // `start()` can refuse — this device holding no encryption key is the one that actually
+        // happens — and it records why on the phase rather than by throwing. Reporting that as a
+        // successful queueing is how a tap on Upload ends up clearing the selection, starting
+        // nothing, and explaining nothing: the rows are queued, but no run is going to take them.
+        // They stay queued, so answering the reason and tapping Resume costs no second selection.
+        if case .paused(let reason?) = phase {
+            logger.error("nothing will drain the queue: \(reason, privacy: .public)")
+            return false
+        }
         return true
     }
 
@@ -332,10 +357,16 @@ final class LibraryImportService: ObservableObject {
         }
 
         phase = .running
+        wasPausedByBackgrounding = false
         rate.begin(at: Date())
         beginBackgroundTask()
         runGeneration &+= 1
         let generation = runGeneration
+        // `notice` rather than `debug`, here and at the two places a run can stop: debug and info
+        // are memory-only, so a build looked at through Console shows *nothing* about an import
+        // unless something throws. "It makes no progress and logs no errors" has to be a statement
+        // about the import rather than about the log level.
+        logger.notice("import run started: \(self.counts.pending) pending, \(self.counts.failed) failed")
         runTask = Task { [weak self] in
             await self?.drain(generation: generation)
         }
@@ -346,15 +377,59 @@ final class LibraryImportService: ObservableObject {
     /// The item itself is not abandoned mid-upload where that can be helped: `URLSession` propagates
     /// the cancellation and Drive only records a file for a request that carried its bytes, so an
     /// interrupted upload leaves nothing half-written to clean up.
-    func pause() {
-        guard runTask != nil else { return }
+    ///
+    /// - Parameter reason: what to tell the user, for the stops they did not ask for. Nil is the
+    ///   Pause button: somebody who pressed it does not need to be told they pressed it.
+    /// - Returns: whether there was a run to stop. The caller that stops one *on the user's behalf*
+    ///   needs to know, so that a run the user had already paused is not later resumed for them.
+    @discardableResult
+    func pause(reason: String? = nil) -> Bool {
+        guard runTask != nil else {
+            // No run to stop — but the phase may still claim there is one. That is what a drain
+            // that ended early leaves behind, and a screen reading "Uploading" over a run that
+            // stopped is the exact shape of this bug.
+            if case .running = phase { phase = .paused(reason) }
+            return false
+        }
         runTask?.cancel()
         runTask = nil
         rate.suspend(at: Date())
         endBackgroundTask()
-        phase = .paused(nil)
+        phase = .paused(reason)
         currentName = nil
+        currentActivity = nil
         currentFraction = 0
+        logger.notice("import run paused: \(reason ?? "by the user", privacy: .public)")
+        return true
+    }
+
+    /// Stops a run because iOS is taking the app away, rather than because the user asked it to.
+    ///
+    /// Remembered as that kind of stop, which is the whole point of it having its own name:
+    /// ``resumeIfBackgrounded()`` carries this one on and leaves a deliberate pause alone.
+    func pauseForBackgrounding() {
+        wasPausedByBackgrounding = pause(reason: Self.backgroundedReason)
+    }
+
+    static let backgroundedReason = """
+        Paused while Neutrino Photos was in the background. It carries on by itself when you come \
+        back to the app — nothing has been lost.
+        """
+
+    /// Carries on a run that iOS stopped, rather than one the user did.
+    ///
+    /// Called when the app comes back to the foreground. An import only runs in the foreground —
+    /// the background assertion buys the seconds after a home-press and no more, which is Epic 7's
+    /// gap, not a bug — so without this a single glance at another app ends an upload permanently
+    /// and says nothing about it.
+    func resumeIfBackgrounded() {
+        guard wasPausedByBackgrounding, runTask == nil else { return }
+        guard counts.hasWorkLeft || counts.failed > 0 else {
+            wasPausedByBackgrounding = false
+            return
+        }
+        logger.notice("resuming an import that the background assertion stopped")
+        start()
     }
 
     /// Puts every failed row back in the queue and starts again — the Retry button.
@@ -370,6 +445,7 @@ final class LibraryImportService: ObservableObject {
     /// what has already been uploaded.
     func cancelRun() async {
         pause()
+        wasPausedByBackgrounding = false
         try? await store?.clearImportQueue()
         failures = []
         await refreshCounts()
@@ -385,10 +461,12 @@ final class LibraryImportService: ObservableObject {
     /// memory from outliving them.
     func reset() async {
         pause()
+        wasPausedByBackgrounding = false
         try? await store?.clearImportQueue()
         await ledger.forget()
         failures = []
         counts = ImportQueueCounts()
+        currentActivity = nil
         lastCompletedAt = nil
         lastScannedAt = nil
         albumIDsByTitle = [:]
@@ -406,6 +484,7 @@ final class LibraryImportService: ObservableObject {
                 endBackgroundTask()
                 rate.suspend(at: Date())
                 currentName = nil
+                currentActivity = nil
                 currentFraction = 0
                 // Originals are written out of the photo library on their way to an upload, and a
                 // run that stopped between two items leaves the last one behind. Over a library of
@@ -437,29 +516,76 @@ final class LibraryImportService: ObservableObject {
 
         await refreshCounts()
         failures = (try? await store?.failedImportItems(limit: 50)) ?? []
-        guard !stoppedEarly, !counts.hasWorkLeft else { return }
+        guard !stoppedEarly, !counts.hasWorkLeft else {
+            // A run that stopped with work left has to have said why. Everything that stops one
+            // deliberately writes a phase — a condition, the Pause button, a store that would not
+            // answer — so reaching here still `.running` means the loop fell out of the bottom
+            // without anybody accounting for it, and the screen would otherwise go on reporting an
+            // upload that has no task behind it and will never move again.
+            if case .running = phase {
+                logger.error("""
+                    import run ended with \(self.counts.pending) item(s) still pending and nothing \
+                    to say about it
+                    """)
+                phase = .interrupted
+            }
+            return
+        }
 
         phase = .finished
         lastCompletedAt = Date()
         await setDate(lastCompletedAt, forKey: LocalStore.MetaKey.lastLibraryImportAt)
-        logger.debug("import finished: \(self.counts.done) imported, \(self.counts.skipped) skipped, \(self.counts.failed) failed")
+        logger.notice("import finished: \(self.counts.done) imported, \(self.counts.skipped) skipped, \(self.counts.failed) failed")
     }
 
     /// One sweep through the pending rows.
     private func drainPass() async {
-        guard let store else { return }
+        guard let store else {
+            phase = .paused(Self.noQueueStorageReason)
+            return
+        }
         while !Task.isCancelled {
             guard await waitForConditions() else { return }
-            guard let next = (try? await store.nextPendingImportItems(limit: 1))?.first else {
+
+            let next: ImportQueueItem?
+            do {
+                next = try await store.nextPendingImportItems(limit: 1).first
+            } catch {
+                // Swallowed here until now, and it is the worst place in the run to swallow
+                // anything: the loop simply returned, the phase stayed `.running`, and the import
+                // stopped dead with an empty log and a progress bar that never moved again.
+                logger.error("could not read the import queue: \(error, privacy: .public)")
+                phase = .paused(Self.unreadableQueueReason)
                 return
             }
-            await process(next)
+            guard let next else { return }
+
+            // A row whose outcome could not be written comes straight back out of the queue, and
+            // the pass would otherwise import the same photograph for ever without the counts
+            // moving — a busy loop that looks exactly like a stall.
+            guard await process(next) else {
+                phase = .paused(Self.unwritableQueueReason)
+                return
+            }
         }
     }
 
+    // MARK: - What a dead queue tells the user
+
+    private static let noQueueStorageReason =
+        "This device's library index is unavailable, so an import can't be resumed if it's interrupted. Import with the photo picker instead."
+
+    private static let unreadableQueueReason =
+        "This iPhone couldn't read the list of photos left to upload, so the import has stopped. Nothing already uploaded is affected — try again, and if it keeps happening, free up some storage."
+
+    private static let unwritableQueueReason =
+        "This iPhone couldn't record which photos have been uploaded, so the import has stopped rather than send the same one over and over. Free up some storage and tap Resume."
+
     // MARK: - One item
 
-    private func process(_ queued: ImportQueueItem) async {
+    /// - Returns: whether the row's outcome was recorded. False means the queue could not be
+    ///   written, which the caller has to treat as the end of the run — see ``drainPass()``.
+    private func process(_ queued: ImportQueueItem) async -> Bool {
         currentFraction = 0
         var staged: URL?
         defer { staged.map { try? FileManager.default.removeItem(at: $0) } }
@@ -467,26 +593,36 @@ final class LibraryImportService: ObservableObject {
         // Asked again here, and not only at scan time: the picker may have imported this very item
         // between the scan and now, and a scan of a fifty-thousand-item library is not instant.
         guard !ledger.contains(localIdentifier: queued.localIdentifier) else {
-            await finish(queued, state: .skipped)
-            return
+            return await finish(queued, state: .skipped)
         }
 
         guard let device = deviceLibrary.attributes(forLocalIdentifier: queued.localIdentifier)
         else {
             // Deleted from the device between the scan and now, or the permission was narrowed.
             // Not a failure: there is nothing to import and nothing anybody can do about it.
-            await finish(queued, state: .skipped, error: "No longer in this device's photo library.")
-            return
+            return await finish(queued, state: .skipped,
+                                error: "No longer in this device's photo library.")
         }
 
         do {
-            let original = try await deviceLibrary.writeOriginal(for: queued.localIdentifier)
+            // The fetch is reported, and not only the upload. It is the part that can take minutes
+            // — an original that lives in iCloud is *downloaded* here — and a screen showing no
+            // name, no percentage and no log line for the whole of it is one that can only be read
+            // as broken. The item has no file name to show yet; that comes out of the resource the
+            // fetch returns. See `DevicePhotoLibrary.write(_:extension:onProgress:)`.
+            currentName = nil
+            currentActivity = Self.fetchingActivity
+            let original = try await deviceLibrary.writeOriginal(
+                for: queued.localIdentifier,
+                onProgress: { [weak self] fraction in self?.currentFraction = fraction })
             staged = original.url
 
             let name = ImagePreparation.fileName(
                 from: original.originalFileName, extension: original.fileExtension,
                 fallbackDate: device.creationDate ?? Date())
             currentName = name
+            currentActivity = Self.uploadingActivity
+            currentFraction = 0
 
             let outcome: MediaImportPipeline.Outcome
             if queued.isVideo {
@@ -502,16 +638,21 @@ final class LibraryImportService: ObservableObject {
             if let item = outcome.item, !queued.albumTitles.isEmpty {
                 await fileIntoAlbums(queued.albumTitles, photoID: item.id)
             }
-            await finish(queued, state: outcome.wasDuplicate ? .skipped : .done)
+            return await finish(queued, state: outcome.wasDuplicate ? .skipped : .done)
         } catch is CancellationError where Task.isCancelled {
             // Left pending on purpose: a cancelled item is one the user paused, and it must be the
             // next thing tried rather than a failure they have to go and retry by hand.
             logger.debug("import cancelled during \(queued.localIdentifier, privacy: .public)")
+            return true
         } catch {
             logger.error("import failed for \(queued.localIdentifier, privacy: .public): \(error, privacy: .public)")
-            await finish(queued, state: .failed, error: error.localizedDescription)
+            return await finish(queued, state: .failed, error: error.localizedDescription)
         }
     }
+
+    /// The two stages of one item, as the progress bar names them.
+    private static let fetchingActivity = "Getting the original from Photos…"
+    private static let uploadingActivity = "Encrypting and uploading…"
 
     /// Turns a written-out original into what should be stored.
     ///
@@ -532,14 +673,27 @@ final class LibraryImportService: ObservableObject {
 
     /// Writes the outcome to the row, which is the thing that makes the run resumable — the state
     /// is on disk before the next item begins, so being killed costs at most one item.
+    ///
+    /// - Returns: false when the row could not be written. The run has to stop on that: the row is
+    ///   still `pending`, so the next sweep would take the same item again, and again, with the
+    ///   counts never moving.
     private func finish(_ queued: ImportQueueItem, state: ImportQueueItem.State,
-                        error: String? = nil) async {
-        try? await store?.updateImportItem(queued.localIdentifier, state: state,
-                                           attempts: queued.attempts + 1, error: error)
+                        error: String? = nil) async -> Bool {
+        do {
+            try await store?.updateImportItem(queued.localIdentifier, state: state,
+                                              attempts: queued.attempts + 1, error: error)
+        } catch {
+            logger.error("""
+                could not record \(state.rawValue, privacy: .public) for \
+                \(queued.localIdentifier, privacy: .public): \(error, privacy: .public)
+                """)
+            return false
+        }
         counts.record(state, bytes: queued.estimatedBytes)
         if state == .done || state == .skipped {
             rate.record(units: queued.estimatedBytes)
         }
+        return true
     }
 
     // MARK: - Albums
@@ -669,7 +823,7 @@ final class LibraryImportService: ObservableObject {
             [weak self] in
             // The window is closing. Stop cleanly: everything up to the last completed item is
             // already on its row, and the interrupted one is still pending.
-            Task { @MainActor in self?.pause() }
+            Task { @MainActor in self?.pauseForBackgrounding() }
         }
     }
 

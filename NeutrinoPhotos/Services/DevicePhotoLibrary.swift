@@ -378,7 +378,11 @@ final class DevicePhotoLibrary: ObservableObject {
     ///   find in a backup. The same preference is why ``writePairedVideo(for:)`` prefers
     ///   `.fullSizePairedVideo`;
     /// - otherwise the original `.photo` / `.video`.
-    func writeOriginal(for identifier: String) async throws -> DeviceOriginal {
+    ///
+    /// - Parameter onProgress: how far the *fetch* has got, 0 to 1. Only meaningful for an item
+    ///   whose bytes are in iCloud rather than on the device — see ``write(_:extension:onProgress:)``.
+    func writeOriginal(for identifier: String,
+                       onProgress: (@MainActor (Double) -> Void)? = nil) async throws -> DeviceOriginal {
         guard access.isUsable else { throw DeviceLibraryError.notAuthorized }
         guard let asset = asset(withLocalIdentifier: identifier) else {
             throw DeviceLibraryError.assetUnavailable
@@ -399,7 +403,7 @@ final class DevicePhotoLibrary: ObservableObject {
             ?? (resource.originalFilename as NSString).pathExtension
         if ext.isEmpty { ext = isVideo ? "mov" : "jpg" }
 
-        let url = try await write(resource, extension: ext)
+        let url = try await write(resource, extension: ext, onProgress: onProgress)
         return DeviceOriginal(
             url: url,
             mimeType: type?.preferredMIMEType ?? (isVideo ? "video/quicktime" : "image/jpeg"),
@@ -456,7 +460,24 @@ final class DevicePhotoLibrary: ObservableObject {
     }
 
     /// Writes one `PHAssetResource` to a fresh file under ``stagingDirectory``. The caller deletes it.
-    private func write(_ resource: PHAssetResource, extension ext: String) async throws -> URL {
+    ///
+    /// ## Why this reports progress
+    ///
+    /// On a phone with "Optimize iPhone Storage" on, most originals are not on the phone at all —
+    /// Apple Photos keeps a thumbnail locally and the full resource in iCloud. This call is then a
+    /// *download*, and on a large video over a slow connection it is minutes long. Without
+    /// `progressHandler` those minutes produce nothing whatsoever: no bytes, no callback, no log
+    /// line, and an import screen sitting at zero with nothing to say — which is indistinguishable
+    /// from an import that has silently died.
+    ///
+    /// The handler is called on an arbitrary queue, hence the hop.
+    ///
+    /// Not cancellable, deliberately and unavoidably: `writeData(for:toFile:options:)` returns no
+    /// request id, so there is nothing to hand `cancelDataRequest(_:)`. A paused run therefore
+    /// finishes fetching the item it was holding and stops at the *next* suspension point, which is
+    /// the upload — that one does cancel.
+    private func write(_ resource: PHAssetResource, extension ext: String,
+                       onProgress: (@MainActor (Double) -> Void)? = nil) async throws -> URL {
         try FileManager.default.createDirectory(at: stagingDirectory,
                                                 withIntermediateDirectories: true)
         let url = stagingDirectory.appendingPathComponent("\(UUID().uuidString).\(ext)")
@@ -466,16 +487,32 @@ final class DevicePhotoLibrary: ObservableObject {
         // An item still only in iCloud Photos has no local bytes at all; without this the request
         // fails rather than fetching them, and a library that has been "optimised" is mostly those.
         options.isNetworkAccessAllowed = true
+        if let onProgress {
+            options.progressHandler = { fraction in
+                Task { @MainActor in onProgress(fraction) }
+            }
+        }
 
-        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
-            PHAssetResourceManager.default().writeData(for: resource, toFile: url,
-                                                       options: options) { error in
-                if let error {
-                    continuation.resume(throwing: error)
-                } else {
-                    continuation.resume()
+        do {
+            try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+                PHAssetResourceManager.default().writeData(for: resource, toFile: url,
+                                                           options: options) { error in
+                    if let error {
+                        continuation.resume(throwing: error)
+                    } else {
+                        continuation.resume()
+                    }
                 }
             }
+        } catch {
+            // Logged here rather than left to the caller: "Photos would not give us the bytes" and
+            // "the upload failed" are different problems with different fixes, and the importer's
+            // one `catch` cannot tell them apart from the error alone.
+            logger.error("""
+                Photos could not write \(resource.originalFilename, privacy: .public): \
+                \(error.localizedDescription, privacy: .public)
+                """)
+            throw error
         }
         return url
     }

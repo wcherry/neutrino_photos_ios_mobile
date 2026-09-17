@@ -32,6 +32,13 @@ struct TimelineGridView: View {
     /// Steps the density in or out. Nil when the timeline should not respond to a pinch at all.
     let onZoom: (TimelineZoomDirection) -> Void
 
+    /// How far through the library the background fill has got, or nil once it holds all of it.
+    ///
+    /// The grid shows photographs after one page and grows behind the reader, so without this the
+    /// bottom of the timeline is indistinguishable from the end of the library — and on a big
+    /// library the two are minutes apart.
+    let fillProgress: LibraryFillProgress?
+
     // MARK: - State
 
     /// Latched for the duration of one pinch so a gesture that keeps growing steps the density once
@@ -60,6 +67,7 @@ struct TimelineGridView: View {
                         }
                         .id(section.id)
                     }
+                    fillFooter
                 }
                 .padding(.bottom, 24)
             }
@@ -79,6 +87,32 @@ struct TimelineGridView: View {
             // changes the first section — so the timeline would scroll away from the picture that
             // just arrived to re-anchor on yesterday.
             .onChange(of: grouping) { _ in restoreAnchor(proxy: proxy) }
+        }
+    }
+
+    // MARK: - Footer
+
+    /// What sits below the last photograph while the library is still arriving.
+    ///
+    /// Inside the `LazyVStack` rather than pinned over the grid, because it is a statement about
+    /// the bottom of the timeline specifically — "there is more below this" — and somewhere in the
+    /// middle of the screen it would read as the whole library being unavailable, which it is not.
+    @ViewBuilder
+    private var fillFooter: some View {
+        if let progress = fillProgress {
+            HStack(spacing: 8) {
+                ProgressView()
+                    .controlSize(.small)
+                Text("Loading \(progress.loaded.formatted()) of \(progress.total.formatted())…")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+            }
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, 20)
+            .accessibilityElement(children: .combine)
+            .accessibilityLabel(
+                "Loading the rest of your library. \(progress.loaded.formatted()) of \(progress.total.formatted()) photos so far."
+            )
         }
     }
 

@@ -169,7 +169,11 @@ struct LibraryView: View {
             selection: $selection,
             onOpen: { viewerStart = $0 },
             contextMenu: { item in AnyView(contextMenu(for: item)) },
-            onZoom: zoom
+            onZoom: zoom,
+            // Suppressed while picking: the footer sits under the last row, which is exactly where
+            // a selection's action bar is, and a spinner arguing with it says nothing useful about
+            // a set of photographs the reader has already chosen.
+            fillProgress: selection.isActive ? nil : library.fillProgress
         )
         .background(
             GeometryReader { geometry in

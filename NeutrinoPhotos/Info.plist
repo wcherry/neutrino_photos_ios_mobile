@@ -44,6 +44,8 @@
 		<key>NSAllowsArbitraryLoads</key>
 		<true/>
 	</dict>
+	<key>NSCameraUsageDescription</key>
+	<string>Neutrino Photos needs camera access to scan the QR code that carries your encryption key.</string>
 	<key>NSPhotoLibraryAddUsageDescription</key>
 	<string>Neutrino Photos needs permission to save a photo back to your device's photo library.</string>
 	<key>NSPhotoLibraryUsageDescription</key>

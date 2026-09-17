@@ -65,6 +65,37 @@ final class MockURLProtocol: URLProtocol {
         }
     }
 
+    /// Serves `photos` as a paged listing, honouring the `limit` and `offset` the client asks for
+    /// and reporting the full count as `total` — which is what the real endpoint does.
+    ///
+    /// A closure over the whole set rather than a canned list of pages, so a test says how big the
+    /// library is and the client decides how to walk it.
+    static func respondWithPagedListing(_ photos: [String]) {
+        handler = handlerForPagedListing(photos)
+    }
+
+    /// The paged responder on its own, for a test that wants to serve some pages and do something
+    /// else with the others — failing everything past the first, say.
+    static func handlerForPagedListing(_ photos: [String]) -> (URLRequest) throws -> (HTTPURLResponse, Data) {
+        { request in
+            let items = URLComponents(url: request.url!, resolvingAgainstBaseURL: false)?
+                .queryItems ?? []
+            let value = { (name: String) in items.first { $0.name == name }?.value.flatMap(Int.init) }
+            let offset = value("offset") ?? 0
+            let limit = value("limit") ?? photos.count
+
+            let page = offset >= photos.count
+                ? []
+                : Array(photos[offset..<min(offset + limit, photos.count)])
+            let json = """
+            {"photos":[\(page.joined(separator: ","))],"total":\(photos.count)}
+            """
+            return (HTTPURLResponse(url: request.url!, statusCode: 200,
+                                    httpVersion: nil, headerFields: nil)!,
+                    Data(json.utf8))
+        }
+    }
+
     /// Responds with raw bytes — for the content endpoints, whose bodies are ciphertext.
     static func respond(data: Data, statusCode: Int = 200) {
         handler = { request in

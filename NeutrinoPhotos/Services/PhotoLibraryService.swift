@@ -2,6 +2,18 @@ import Foundation
 import os.log
 import NeutrinoCore
 
+// MARK: - LibraryFillProgress
+
+/// How much of the library has arrived while the rest is still coming.
+///
+/// A type rather than two loose integers because the pair is only meaningful together, and because
+/// the timeline's footer should be handed one value that is either there or not — see
+/// ``PhotoLibraryService/fillProgress``.
+struct LibraryFillProgress: Equatable {
+    let loaded: Int
+    let total: Int
+}
+
 // MARK: - PhotoLibraryService
 
 /// The library itself: what is in it, and the small set of facts the app can change about an item.
@@ -41,7 +53,24 @@ final class PhotoLibraryService: ObservableObject {
     /// `GET /api/v1/photos/trash` — Recently Deleted.
     @Published private(set) var trashItems: [MediaItem] = []
 
+    /// True while the *first* page is in flight — the one the timeline paints from. Deliberately
+    /// not true for the rest of the walk: a spinner that stays up for the two minutes a 25,000
+    /// photo library takes to fill in would be reporting "empty" over a grid full of photographs.
     @Published var isLoading = false
+
+    /// True while the rest of the library is arriving behind the first page.
+    ///
+    /// Separate from ``isLoading`` because it means something different to the reader: the grid is
+    /// usable and growing, rather than not there yet. It is what the timeline's footer reads, and
+    /// what anything quoting a count should check before presenting the number as final.
+    @Published private(set) var isFillingIn = false
+
+    /// How many photos the server says the library holds, as of the last first page.
+    ///
+    /// Nil until a listing has been read. Worth having separately from `allItems.count` because
+    /// for most of a fill those two disagree, and the difference is exactly the progress.
+    @Published private(set) var libraryTotal: Int?
+
     @Published var error: String?
 
     /// When the library was last read from the server, for the timeline's status line.
@@ -68,6 +97,10 @@ final class PhotoLibraryService: ObservableObject {
 
     /// The listing request in flight, so concurrent callers of ``load()`` share one — see there.
     private var loadInFlight: Task<Void, Never>?
+
+    /// The walk bringing in everything after the first page. Held so a refresh can cancel the walk
+    /// it is superseding, and so ``loadEverything()`` has something to wait on.
+    private var fillTask: Task<Void, Never>?
 
     /// No key-decoding strategy: the Photos endpoints already serialize camelCase
     /// (`#[serde(rename_all = "camelCase")]`). Timestamps arrive as RFC 3339 from `to_rfc3339()`,
@@ -97,6 +130,17 @@ final class PhotoLibraryService: ObservableObject {
     #endif
 
     // MARK: - Queries
+
+    /// How far through the library the background fill has got, or nil when there is nothing left
+    /// to wait for.
+    ///
+    /// Nil rather than a completed figure so a caller cannot accidentally render "25,000 of
+    /// 25,000" forever: the absence is the signal that the library is whole. It is also nil while
+    /// the *first* page is still in flight, since there is no timeline to put a footer under yet.
+    var fillProgress: LibraryFillProgress? {
+        guard isFillingIn, let total = libraryTotal, allItems.count < total else { return nil }
+        return LibraryFillProgress(loaded: allItems.count, total: total)
+    }
 
     /// The items the timeline should show, newest first.
     func timeline(showingArchived: Bool) -> [MediaItem] {
@@ -145,11 +189,24 @@ final class PhotoLibraryService: ObservableObject {
 
     // MARK: - Loading
 
-    /// Loads the whole library, archived items included.
+    /// Reads the library, archived items included, and returns as soon as there is a timeline.
     ///
-    /// Note the query parameter's name. `archivedOnly=true` reads, in the handler, as
-    /// `include_archived` — it *adds* archived photographs to the listing rather than restricting
-    /// it to them (`list_photos` in `src/photos/photos/repository.rs`). Everything is fetched once
+    /// ## What "as soon as" means
+    ///
+    /// One page — see ``fetchPage(offset:)`` — which is several screenfuls at any grid density.
+    /// The rest arrives behind it under ``isFillingIn``, so a 25,000 photo library shows
+    /// photographs after one request rather than after a hundred and twenty-five. Nothing is given
+    /// up by doing it this way: the walk still runs to the end, so the collections, the counts and
+    /// the scrubber are all eventually working from the whole library exactly as before. What
+    /// changes is only that the reader is not kept waiting for the parts they cannot see yet.
+    ///
+    /// Callers that cannot work with a fraction want ``loadEverything()``.
+    ///
+    /// ## The parameter's name
+    ///
+    /// `archivedOnly=true` reads, in the handler, as `include_archived` — it *adds* archived
+    /// photographs to the listing rather than restricting it to them (`list_photos` in
+    /// `src/photos/photos/repository.rs`). Archived items are fetched alongside everything else
     /// and filtered on the device, so the Archive view and the Show Archived setting are both free.
     func load() async {
         // Every launch asks for this listing twice — `ContentView` refreshes whenever an import
@@ -173,6 +230,16 @@ final class PhotoLibraryService: ObservableObject {
         await task.value
     }
 
+    /// Loads the library and waits for all of it, the background fill included.
+    ///
+    /// ``load()`` deliberately does not do this — it returns as soon as there is a timeline to
+    /// look at. This is for the callers that genuinely cannot work with a fraction: a test
+    /// asserting on the whole library, or anything that has to quote a final count.
+    func loadEverything() async {
+        await load()
+        await fillTask?.value
+    }
+
     private func performLoad() async {
         await hydrateIfNeeded()
 
@@ -180,14 +247,26 @@ final class PhotoLibraryService: ObservableObject {
         error = nil
         defer { isLoading = false }
 
+        // Whether there is anything on screen to disturb. A first-ever launch has nothing, so each
+        // page can be shown the moment it lands; a refresh — or a launch over a hydrated cache —
+        // is looking at a full timeline, and truncating that to two hundred rows to refill it
+        // would be a visible collapse under the reader's thumb. Same walk either way; the flag
+        // only decides whether it is assembled on screen or off it.
+        let timelineIsEmpty = allItems.isEmpty
+
         do {
-            let response: APIListPhotosResponse =
-                try await api.get("/api/v1/photos?archivedOnly=true", decoder: Self.decoder)
-            let merged = mergingDeviceOnlyMetadata(into: response.photos)
-            allItems = merged
+            let first = try await fetchPage(offset: 0)
+            libraryTotal = first.total
             lastLoadedAt = Date()
-            logger.debug("load succeeded: \(response.photos.count) items")
-            try? await store?.replaceLibrary(with: merged)
+
+            if timelineIsEmpty {
+                let merged = mergingDeviceOnlyMetadata(into: first.photos)
+                allItems = merged
+                await save(merged)
+            }
+            logger.debug("first page: \(first.photos.count) of \(first.total)")
+
+            startFillingIn(after: first, streamingIntoTheTimeline: timelineIsEmpty)
         } catch where error.isCancellation {
             // Somebody navigated away, or an import started and re-keyed the refresh out from under
             // this one. The timeline on screen is untouched and a fresh load is already coming, so
@@ -202,6 +281,171 @@ final class PhotoLibraryService: ObservableObject {
             self.error = error.localizedDescription
         }
     }
+
+    /// One page of the listing, and how many photos the library holds in total.
+    private struct Page {
+        let photos: [MediaItem]
+        let total: Int
+    }
+
+    /// Reads one page of the listing.
+    ///
+    /// ## Why this is paged at all
+    ///
+    /// The listing carries every photo's metadata inline — roughly 800 bytes each — so a library
+    /// the size of a camera roll is tens of megabytes in a single response. A phone does not
+    /// finish reading that before `URLSession`'s sixty-second wait-for-data timer gives up, which
+    /// is what issue #3 turned out to be: a network error over an empty grid on every refresh.
+    ///
+    /// ## Why `orderBy=captureDate`
+    ///
+    /// Because paging and sorting are one decision, not two. `LIMIT`/`OFFSET` cuts along whatever
+    /// the server sorted by, so asking for photos in arrival order and then showing them in
+    /// capture order — which is what ``MediaItem/timelineDate`` does — would make every page an
+    /// arbitrary slice of the timeline rather than the next part of it. Sorting the page after it
+    /// arrives does not fix that; it only sorts what has already come. In arrival order a scanned
+    /// print lands on page one and belongs in 1998, so a fill would keep inserting rows *above*
+    /// where the reader is looking and shifting the grid under them. In capture order every page
+    /// lands strictly below the last, and the timeline only ever grows downwards.
+    ///
+    /// A server that does not know the parameter ignores it and sorts by arrival, which is what
+    /// this app did until now: no worse than before, and no better until the server side lands.
+    private func fetchPage(offset: Int) async throws -> Page {
+        let response: APIListPhotosResponse = try await api.get(
+            "/api/v1/photos?archivedOnly=true&orderBy=captureDate"
+                + "&limit=\(Self.pageSize)&offset=\(offset)",
+            decoder: Self.decoder
+        )
+        return Page(photos: response.photos, total: response.total)
+    }
+
+    /// Brings in the rest of the library behind the first page, without blocking on it.
+    ///
+    /// Unstructured and detached from whoever called ``load()``: the fill outlives a tab switch or
+    /// a view disappearing, which is the point — the reader should come back to a library that
+    /// carried on arriving rather than one that restarted. A *refresh* does cancel it, because the
+    /// walk it was doing is the one being superseded.
+    private func startFillingIn(after first: Page, streamingIntoTheTimeline streaming: Bool) {
+        fillTask?.cancel()
+        isFillingIn = true
+
+        // The task has to know its own identity, because cancelling a walk does not stop it —
+        // it stops at its next suspension point, which is *after* the walk that superseded it has
+        // already put itself here. A finishing walk that cleared this unconditionally would
+        // therefore orphan its own replacement: the reference goes, `loadEverything()` finds
+        // nothing to wait on and returns early, and the library quietly stops at whatever page the
+        // running walk had reached. Which is exactly what it did.
+        var task: Task<Void, Never>!
+        task = Task { @MainActor [weak self] in
+            await self?.fillIn(after: first, streamingIntoTheTimeline: streaming)
+            guard let self, self.fillTask == task else { return }
+            self.fillTask = nil
+            self.isFillingIn = false
+        }
+        fillTask = task
+    }
+
+    /// Stops the background walk. Sign-out needs it, and so does anything tearing the service down
+    /// while a library is still arriving.
+    func cancelFill() {
+        fillTask?.cancel()
+        fillTask = nil
+        isFillingIn = false
+    }
+
+    /// Walks the listing from the second page to the end.
+    ///
+    /// ## Where it stops
+    ///
+    /// `total` is the library's count rather than the page's, so the walk ends when it has that
+    /// many. Two other conditions guard it, and neither is theoretical: a short page means the
+    /// server has run out regardless of what it counted, and ``maxPages`` stops a server whose
+    /// `total` disagrees with what it will actually hand over from spinning the phone forever.
+    ///
+    /// ## What it leaves behind on the way out
+    ///
+    /// A walk that finishes is authoritative, and only then is the device's copy replaced — which
+    /// is what takes photographs deleted on another device off this one. A walk that fails or is
+    /// cancelled says nothing about what was removed, so it reconciles nothing; treating a half
+    /// walk as the whole library would delete the other half off the phone.
+    private func fillIn(after first: Page, streamingIntoTheTimeline streaming: Bool) async {
+        var collected = first.photos
+        var seen = Set(first.photos.map(\.id))
+
+        // `isFillingIn` is owned by ``startFillingIn(after:streamingIntoTheTimeline:)`` rather than
+        // deferred here, for the same reason the task checks its identity: a superseded walk
+        // finishing after its replacement started would otherwise clear the flag out from under a
+        // walk that is still going.
+        do {
+            for page in 1..<Self.maxPages {
+                guard collected.count < first.total else { break }
+                try Task.checkCancellation()
+
+                let next = try await fetchPage(offset: page * Self.pageSize)
+                guard !next.photos.isEmpty else { break }
+
+                // Offset paging over a library somebody is still adding to can hand back a photo
+                // that has already been seen: an insert above the frontier shifts every later row
+                // down one, and the next page starts one short of where the last left off. Keeping
+                // the first copy is right either way — the alternative is the same photograph
+                // twice in the grid.
+                let fresh = next.photos.filter { seen.insert($0.id).inserted }
+                collected.append(contentsOf: fresh)
+
+                if streaming, !fresh.isEmpty {
+                    let merged = mergingDeviceOnlyMetadata(into: fresh)
+                    allItems.append(contentsOf: merged)
+                    await save(merged)
+                }
+
+                if next.photos.count < Self.pageSize { break }
+            }
+
+            let merged = mergingDeviceOnlyMetadata(into: collected)
+            allItems = merged
+            libraryTotal = merged.count
+            logger.debug("fill complete: \(merged.count) items")
+            try? await store?.replaceLibrary(with: merged)
+        } catch where error.isCancellation {
+            // A refresh replaced this walk, or the app is going away. Whatever arrived stays: it is
+            // a real part of the library, and the walk that superseded this one is already running.
+            logger.debug("fill cancelled at \(collected.count) items")
+        } catch {
+            // The timeline is on screen and usable, so this is not the empty-grid failure issue #3
+            // was. It is still worth reporting, because every count in the app is now a fraction
+            // and silently showing "1,400 Photos" for a library of 25,000 would be a lie the
+            // reader has no way to spot.
+            logger.error("fill failed at \(collected.count) items: \(error, privacy: .public)")
+            self.error = error.localizedDescription
+        }
+    }
+
+    /// Writes a batch to the device's copy, yielding between items.
+    ///
+    /// The yield is not ceremony: ``LocalStore`` is an actor reached from the main one, and a
+    /// two-hundred-item page written in a tight loop is two hundred hops with no room for a frame
+    /// in between. The fill runs while somebody is scrolling the grid it is filling.
+    private func save(_ items: [MediaItem]) async {
+        for item in items {
+            try? await store?.save(item)
+        }
+    }
+
+    /// Photos per request — the same 200 the web client pages its own library by
+    /// (`LIBRARY_PAGE_SIZE` in `web/packages/api-photos`). One page is a couple of hundred
+    /// kilobytes, which lands well inside any timeout, and matching the web app means the two
+    /// clients put the same shape of load on the endpoint rather than each having its own idea of
+    /// what a page is. The server clamps anything above 1000, so this is comfortably under.
+    ///
+    /// It is also several screenfuls at any grid density, which is what lets the first page stand
+    /// in for the whole library until the rest catches up.
+    private static let pageSize = 200
+
+    /// A stop on the paging loop, not a limit on the library. Derived from ``pageSize`` rather
+    /// than written out, so changing the page size cannot quietly lower the ceiling: half a
+    /// million photographs is far past any real camera roll, and the point of the guard is that a
+    /// server which keeps answering full pages cannot hold the app in a loop that never ends.
+    private static let maxPages = 500_000 / pageSize
 
     func loadTrash() async {
         do {
@@ -247,9 +491,15 @@ final class PhotoLibraryService: ObservableObject {
     /// Empties the device's copy — what signing out wants, since the next account's library has
     /// nothing to do with this one's.
     func clearLocalCopy() async {
+        // Before anything is emptied, or the walk still in flight would go on appending the last
+        // account's photographs to a timeline that has just been cleared for the next one.
+        cancelFill()
+        loadInFlight?.cancel()
+
         allItems = []
         trashItems = []
         isHydrated = false
+        libraryTotal = nil
         try? await store?.clear()
     }
 
