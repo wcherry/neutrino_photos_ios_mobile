@@ -90,6 +90,10 @@ targets:
           - UIInterfaceOrientationPortraitUpsideDown
           - UIInterfaceOrientationLandscapeLeft
           - UIInterfaceOrientationLandscapeRight
+        # The key QR scanner in `NeutrinoUI`'s shared `KeyImportView` drives the camera through
+        # `DataScannerViewController`, so this app needs the string even though nothing else here
+        # takes a picture. Without it the scan sheet terminates the process rather than prompting.
+        NSCameraUsageDescription: "Neutrino Photos needs camera access to scan the QR code that carries your encryption key."
         # Import runs through SwiftUI's `PhotosPicker`, which selects out of process and hands
         # back only what the user picked — that needs no photo-library authorization. This string
         # covers the *other* direction: saving a photo back to the device's library from the
