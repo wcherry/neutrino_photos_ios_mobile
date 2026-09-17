@@ -157,7 +157,7 @@ find_simulator() {
 # own note in `devicectl --help` says the JSON file is the only supported
 # interface for scripts. plutil reads it without pulling in jq or python.
 list_devices() {
-  local json udid name platform paired osver devmode i=0
+  local json udid name platform reality paired osver devmode i=0
   json="$(mktemp -t neutrino-devices)"
   # A device is queried over the network as well as USB, so this can take a
   # moment; the timeout keeps a sleeping iPhone from hanging the script.
@@ -167,12 +167,20 @@ list_devices() {
   while :; do
     udid="$(plutil -extract "result.devices.$i.hardwareProperties.udid" raw -o - "$json" 2>/dev/null)" || break
     platform="$(plutil -extract "result.devices.$i.hardwareProperties.platform" raw -o - "$json" 2>/dev/null || true)"
+    reality="$(plutil -extract "result.devices.$i.hardwareProperties.reality" raw -o - "$json" 2>/dev/null || true)"
     name="$(plutil -extract "result.devices.$i.deviceProperties.name" raw -o - "$json" 2>/dev/null || true)"
     paired="$(plutil -extract "result.devices.$i.connectionProperties.pairingState" raw -o - "$json" 2>/dev/null || true)"
     osver="$(plutil -extract "result.devices.$i.deviceProperties.osVersionNumber" raw -o - "$json" 2>/dev/null || true)"
     devmode="$(plutil -extract "result.devices.$i.deviceProperties.developerModeStatus" raw -o - "$json" 2>/dev/null || true)"
     i=$((i + 1))
     [[ "$platform" == "iOS" ]] || continue
+    # Xcode 26 started listing simulators here too, and they answer every other
+    # question exactly as a real device does — platform "iOS", pairingState
+    # "paired" — so `reality` is the only field that tells the two apart.
+    # Without this, --physical sees a dozen "paired devices" and refuses to pick.
+    # An older devicectl has no such key and lists physical devices only, which
+    # is what the empty case allows for.
+    [[ -z "$reality" || "$reality" == "physical" ]] || continue
     [[ "$paired" == "paired" ]] || continue
     printf '%s\t%s\t%s\t%s\n' "$udid" "$name" "$osver" "$devmode"
   done
