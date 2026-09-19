@@ -48,6 +48,17 @@ targets:
     entitlements:
       path: NeutrinoPhotos/NeutrinoPhotos.entitlements
       properties:
+        # Cross-app Keychain access group, declared by all six Neutrino apps. Holds the
+        # identity keyring and nothing else — sessions stay namespaced per app — so a key
+        # imported in one app is a key the others already have. See
+        # NeutrinoAppConfig.sharedIdentityGroup in neutrino_shared_ios.
+        keychain-access-groups:
+          # This app's own group first, and it must stay first: the *default* access group — where
+          # an item written without an explicit group lands — is the first entry in this list. Left
+          # implicit, adding the shared group below would silently make it the default and start
+          # writing this app's access and refresh tokens into a container the other five can read.
+          - $(AppIdentifierPrefix)$(CFBundleIdentifier)
+          - $(AppIdentifierPrefix)com.neutrino.shared
         # Universal Links: `https://www.getneutrino.app/open/photo/<id>` should open here rather
         # than in Safari. Both host spellings are claimed so a link pasted without the "www."
         # still resolves. Which *paths* reach this app is decided by the apple-app-site-association
