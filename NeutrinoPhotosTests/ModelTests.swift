@@ -74,21 +74,43 @@ final class MediaItemTests: XCTestCase {
         XCTAssertEqual(Fixture.item(fileName: ".hidden").displayName, ".hidden")
     }
 
-    func testThumbnailDataDecodesTheBase64TheListingCarries() {
-        let encoded = Data("preview".utf8).base64EncodedString()
-        XCTAssertEqual(Fixture.item(thumbnailBase64: encoded).thumbnailData, Data("preview".utf8))
-        XCTAssertNil(Fixture.item(thumbnailBase64: nil).thumbnailData)
-    }
-
     func testDecodesTheServersPhotoResponse() throws {
-        let json = Fixture.photoJSON(id: "p", fileID: "f", thumbnail: "AAAA", isStarred: true)
+        let json = Fixture.photoJSON(id: "p", fileID: "f",
+                                     thumbnailURL: "/api/v1/drive/files/f/thumbnail?v=1",
+                                     isStarred: true)
         let item = try PhotoLibraryService.decoder.decode(MediaItem.self, from: Data(json.utf8))
 
         XCTAssertEqual(item.id, "p")
         XCTAssertEqual(item.fileID, "f")
-        XCTAssertEqual(item.thumbnailBase64, "AAAA")
+        XCTAssertEqual(item.thumbnailURL, "/api/v1/drive/files/f/thumbnail?v=1")
         XCTAssertTrue(item.isStarred)
         XCTAssertNil(item.metadata)
+    }
+
+    /// Issue #12: the server moved the cover thumbnail out of the listing and onto a URL (#175),
+    /// and this app went on reading the key it had stopped sending — so every cell whose picture
+    /// was not already on the device drew a placeholder, for ever.
+    func testReadsTheThumbnailURLRatherThanTheKeyTheServerStoppedSending() throws {
+        let json = """
+        {"id":"p","fileId":"f","fileName":"IMG_1.jpg","mimeType":"image/jpeg","sizeBytes":1,
+         "contentUrl":"/api/v1/drive/files/f",
+         "thumbnailUrl":"/api/v1/drive/files/f/thumbnail?v=1767312000000",
+         "isStarred":false,"isArchived":false,"captureDate":null,
+         "createdAt":"2026-01-01T00:00:00.000000000+00:00",
+         "updatedAt":"2026-01-01T00:00:00.000000000+00:00","deletedAt":null,"metadata":null}
+        """
+        let item = try PhotoLibraryService.decoder.decode(MediaItem.self, from: Data(json.utf8))
+
+        XCTAssertEqual(item.thumbnailURL, "/api/v1/drive/files/f/thumbnail?v=1767312000000")
+    }
+
+    /// A video, or a photograph whose thumbnail job has not run: null, and the cell draws its
+    /// symbol rather than asking for bytes that are not there.
+    func testAPhotoWithNoThumbnailDecodesToNoURL() throws {
+        let json = Fixture.photoJSON(id: "p", fileID: "f", thumbnailURL: nil)
+        let item = try PhotoLibraryService.decoder.decode(MediaItem.self, from: Data(json.utf8))
+
+        XCTAssertNil(item.thumbnailURL)
     }
 
     func testDecodesExtractedMetadataWhenTheWorkerHasRun() throws {

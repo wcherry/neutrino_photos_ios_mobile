@@ -33,7 +33,8 @@ final class PhotoLibraryServiceTests: XCTestCase {
 
     func testLoadDecodesTheListing() async {
         MockURLProtocol.respond(data: Fixture.listingJSON([
-            Fixture.photoJSON(id: "a", fileID: "file-a", thumbnail: "AAAA"),
+            Fixture.photoJSON(id: "a", fileID: "file-a",
+                              thumbnailURL: "/api/v1/drive/files/file-a/thumbnail?v=1"),
             Fixture.photoJSON(id: "b", fileID: "file-b", isStarred: true),
         ]))
 
@@ -41,7 +42,8 @@ final class PhotoLibraryServiceTests: XCTestCase {
 
         XCTAssertEqual(sut.allItems.count, 2)
         XCTAssertEqual(sut.allItems.first?.fileID, "file-a")
-        XCTAssertEqual(sut.allItems.first?.thumbnailBase64, "AAAA")
+        XCTAssertEqual(sut.allItems.first?.thumbnailURL,
+                       "/api/v1/drive/files/file-a/thumbnail?v=1")
         XCTAssertEqual(sut.favorites.map(\.id), ["b"])
         XCTAssertNil(sut.error)
         XCTAssertNotNil(sut.lastLoadedAt)

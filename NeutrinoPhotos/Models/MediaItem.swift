@@ -41,10 +41,15 @@ struct MediaItem: Identifiable, Hashable {
     let fileName: String
     let mimeType: String
     let sizeBytes: Int64
-    /// Drive's plaintext cover thumbnail, base64 without a `data:` prefix. Nil until the server's
-    /// thumbnail job has run, or when the uploading client sent none.
-    let thumbnailBase64: String?
-    let thumbnailMIMEType: String?
+    /// Where the grid's picture is fetched from — a relative path such as
+    /// `/api/v1/drive/files/<id>/thumbnail?v=<updatedAt millis>` — or nil when the item has no
+    /// thumbnail at all: a video, or a file whose uploader sent none.
+    ///
+    /// A URL rather than base64 bytes since issue #175, which moved the thumbnail out of the Drive
+    /// row and out of every listing that quoted it. The `v` is a cache token that moves when the
+    /// thumbnail does, and the request carries the account's bearer token like any other read —
+    /// see ``ThumbnailCache``, which is the only thing that should be dereferencing this.
+    let thumbnailURL: String?
     var isStarred: Bool
     var isArchived: Bool
     /// When the picture was taken, where that is known — from EXIF at upload time. Nil for an item
@@ -77,12 +82,6 @@ struct MediaItem: Identifiable, Hashable {
     /// reached the server. Every grouping and sort in the app goes through this one property so a
     /// photo cannot appear under one date in the timeline and another in a section header.
     var timelineDate: Date { captureDate ?? createdAt }
-
-    /// The decoded cover thumbnail, or nil when there is none to decode.
-    var thumbnailData: Data? {
-        guard let thumbnailBase64 else { return nil }
-        return Data(base64Encoded: thumbnailBase64)
-    }
 
     /// The file name without its extension — what the viewer shows as a title.
     var displayName: String {
@@ -117,7 +116,7 @@ struct MediaItem: Identifiable, Hashable {
     // MARK: - Init
 
     init(id: String, fileID: String, fileName: String, mimeType: String, sizeBytes: Int64,
-         thumbnailBase64: String? = nil, thumbnailMIMEType: String? = nil,
+         thumbnailURL: String? = nil,
          isStarred: Bool = false, isArchived: Bool = false, captureDate: Date? = nil,
          createdAt: Date, updatedAt: Date, deletedAt: Date? = nil,
          metadata: MediaMetadata? = nil) {
@@ -126,8 +125,7 @@ struct MediaItem: Identifiable, Hashable {
         self.fileName = fileName
         self.mimeType = mimeType
         self.sizeBytes = sizeBytes
-        self.thumbnailBase64 = thumbnailBase64
-        self.thumbnailMIMEType = thumbnailMIMEType
+        self.thumbnailURL = thumbnailURL
         self.isStarred = isStarred
         self.isArchived = isArchived
         self.captureDate = captureDate
@@ -386,7 +384,7 @@ extension MediaItem: Decodable {
     /// The Photos endpoints serialize with serde's `rename_all = "camelCase"`, so these names are
     /// the wire names and no key strategy is applied — see `PhotoLibraryService.decoder`.
     private enum CodingKeys: String, CodingKey {
-        case id, fileId, fileName, mimeType, sizeBytes, thumbnail, thumbnailMimeType
+        case id, fileId, fileName, mimeType, sizeBytes, thumbnailUrl
         case isStarred, isArchived, captureDate, createdAt, updatedAt, deletedAt, metadata
     }
 
@@ -397,8 +395,7 @@ extension MediaItem: Decodable {
         fileName = try container.decode(String.self, forKey: .fileName)
         mimeType = try container.decode(String.self, forKey: .mimeType)
         sizeBytes = try container.decode(Int64.self, forKey: .sizeBytes)
-        thumbnailBase64 = try container.decodeIfPresent(String.self, forKey: .thumbnail)
-        thumbnailMIMEType = try container.decodeIfPresent(String.self, forKey: .thumbnailMimeType)
+        thumbnailURL = try container.decodeIfPresent(String.self, forKey: .thumbnailUrl)
         isStarred = try container.decode(Bool.self, forKey: .isStarred)
         isArchived = try container.decode(Bool.self, forKey: .isArchived)
         captureDate = try container.decodeIfPresent(Date.self, forKey: .captureDate)
