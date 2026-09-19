@@ -284,6 +284,15 @@ struct LibraryView: View {
                 importControl
             }
         }
+
+        // Photos has no New Folder to sit beside, so this is the whole of its overflow menu —
+        // iOS builds the ⋯ itself from secondary actions. Hidden while selecting, where the
+        // toolbar belongs to the selection and a ⋯ is one more thing between the user and Done.
+        if !selection.isActive {
+            ToolbarItem(placement: .secondaryAction) {
+                ReportBugButton()
+            }
+        }
     }
 
     /// The picker on its own, or a menu offering the picker and the whole library.
