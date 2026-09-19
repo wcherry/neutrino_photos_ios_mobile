@@ -91,8 +91,11 @@ struct LibraryView: View {
         // right answer, so selection mode simply does not offer it.
         .refreshable { if !selection.isActive { await library.load() } }
         .task {
-            // Once per appearance rather than on every navigation: `refreshable` and the import
-            // completion handler cover the cases where the library has actually changed.
+            // The first read only. Every later one is somebody else's job: pulling to refresh
+            // above, and `ContentView`, which watches for the app coming back to the foreground and
+            // for this tab being re-selected. Re-reading from here as well would mean two throttles
+            // for one question — and this view cannot answer it anyway, since an appearance says
+            // nothing about how long the app was away.
             guard !hasLoaded else { return }
             hasLoaded = true
             await library.load()

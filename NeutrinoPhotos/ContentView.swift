@@ -15,6 +15,11 @@ struct ContentView: View {
 
     @EnvironmentObject private var library: PhotoLibraryService
     @EnvironmentObject private var importer: PhotoImportService
+    /// Held, like ``importer``, only to know whether this device is mid-import — see
+    /// ``isImporting``.
+    @EnvironmentObject private var libraryImporter: LibraryImportService
+
+    @Environment(\.scenePhase) private var scenePhase
 
     @State private var selectedTab: Tab = .library
 
@@ -64,5 +69,29 @@ struct ContentView: View {
             guard !importer.isImporting else { return }
             await library.load()
         }
+        // Issue #13: the two moments a timeline is worth looking at again, and the reason they live
+        // here rather than in `LibraryView`. That view knows when it appears; it does not know that
+        // the app was away for an hour, and it cannot see the tab bar it is inside. This does, and
+        // it already owns the third trigger above — so all three reasons the library gets re-read
+        // are in one place and throttle against each other through `refreshIfStale`.
+        .onChange(of: scenePhase) { phase in
+            guard phase == .active, !isImporting else { return }
+            Task { await library.refreshIfStale() }
+        }
+        .onChange(of: selectedTab) { tab in
+            guard tab == .library, !isImporting else { return }
+            Task { await library.refreshIfStale() }
+        }
+    }
+
+    // MARK: - Importing
+
+    /// True while this device is putting photographs into the library itself.
+    ///
+    /// Not merely wasted work to refresh through: a walk replaces the whole timeline with what the
+    /// server said when it *started*, so an item registered while it ran would drop out of the grid
+    /// until the next load. A run gets its refresh when it finishes, from the task above.
+    private var isImporting: Bool {
+        importer.isImporting || libraryImporter.isBusy
     }
 }

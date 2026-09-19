@@ -4,16 +4,16 @@ import SwiftUI
 
 /// One square cell in a grid.
 ///
-/// Draws the plaintext cover thumbnail the Drive file carries — no download, no decryption, no
-/// network call per cell. That is what lets a thousand-item timeline scroll: the pictures were
-/// already in the listing response.
+/// Draws the plaintext cover thumbnail the Drive file carries — no decryption, and nothing bigger
+/// than a 512 px JPEG per cell. That is what lets a thousand-item timeline scroll.
 ///
 /// An item with no thumbnail is one the uploading client sent none for (every video, today) or one
 /// whose server-side thumbnail job has not run yet. It draws its symbol rather than a blank square,
 /// so the grid stays legible instead of gaining holes.
 ///
-/// The decode goes through ``ThumbnailCache`` rather than happening here, so a cell scrolled back
-/// into view redraws from a bitmap the app already has instead of decoding the same JPEG again.
+/// The fetch and the decode both go through ``ThumbnailCache`` rather than happening here, so a
+/// cell scrolled back into view redraws from a bitmap the app already has instead of asking the
+/// server for a picture it already fetched.
 struct PhotoThumbnailView: View {
 
     // MARK: - SelectionState
@@ -67,10 +67,11 @@ struct PhotoThumbnailView: View {
         // rather than padding: it leaves the layout alone, so selecting cannot reflow the grid.
         .scaleEffect(selectionState == .selected ? 0.88 : 1)
         .animation(.easeOut(duration: 0.12), value: selectionState)
-        // Keyed on the file *and* on whether it has a thumbnail at all, so a cell drawn before the
-        // server's thumbnail job has run redraws when the next listing brings one. Not keyed on the
-        // base64 itself: that is tens of kilobytes, compared on every scroll pass.
-        .task(id: ThumbnailIdentity(fileID: item.fileID, hasThumbnail: item.thumbnailBase64 != nil)) {
+        // Keyed on the file *and* on where its thumbnail lives, so a cell drawn before the server's
+        // thumbnail job has run redraws when the next listing brings a URL. The URL is safe to
+        // compare on every scroll pass in a way the base64 it replaced was not — it is sixty bytes
+        // rather than thirty kilobytes — and it moves when the thumbnail itself does.
+        .task(id: ThumbnailIdentity(fileID: item.fileID, thumbnailURL: item.thumbnailURL)) {
             image = await thumbnails.image(for: item)
         }
     }
@@ -136,5 +137,5 @@ struct PhotoThumbnailView: View {
 /// What has to change for a cell to fetch its picture again.
 private struct ThumbnailIdentity: Equatable {
     let fileID: String
-    let hasThumbnail: Bool
+    let thumbnailURL: String?
 }

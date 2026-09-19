@@ -190,6 +190,23 @@ final class APIClient: ObservableObject {
         try await send(method: "GET", path: path)
     }
 
+    /// Raw bytes whose absence is a fact rather than a failure — the bytes equivalent of
+    /// ``getIfPresent(_:decoder:)``.
+    ///
+    /// A cover thumbnail is the case this exists for: the listing hands out its URL from the same
+    /// row that records whether there is one, so a 404 here means the thumbnail was replaced or
+    /// swept between the listing and the fetch. That is a placeholder in one grid cell, not an
+    /// error worth showing anybody.
+    func dataIfPresent(path: String) async throws -> Data? {
+        let request = try makeRequest(method: "GET", path: path)
+        let (data, http) = try await execute(request)
+        if http.statusCode == 404 || http.statusCode == 403 { return nil }
+        guard (200...299).contains(http.statusCode) else {
+            throw APIError.server(statusCode: http.statusCode)
+        }
+        return data
+    }
+
     /// Downloads to a file rather than into memory, and moves it to `destination`.
     ///
     /// The difference matters at exactly one size: a 10 GB video fetched with ``data(path:)`` is
@@ -373,6 +390,16 @@ final class APIClient: ObservableObject {
         guard let http = response as? HTTPURLResponse else { throw APIError.server(statusCode: 0) }
         logger.debug("<-- \(http.statusCode) \(request.url?.path ?? "?", privacy: .public)")
         return (data, http)
+    }
+}
+
+// MARK: - ThumbnailFetching
+
+/// The grid's picture, fetched. Declared here rather than beside ``ThumbnailFetching`` because a
+/// protocol inheriting `Sendable` must be conformed to in the file that declares the class.
+extension APIClient: ThumbnailFetching {
+    func thumbnailData(at path: String) async throws -> Data? {
+        try await dataIfPresent(path: path)
     }
 }
 

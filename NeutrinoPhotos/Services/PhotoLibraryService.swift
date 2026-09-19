@@ -240,6 +240,48 @@ final class PhotoLibraryService: ObservableObject {
         await fillTask?.value
     }
 
+    // MARK: - Staying current
+
+    /// How long the timeline on screen is trusted before a reason to look again is acted on.
+    ///
+    /// The throttle is the design. Both triggers — coming back to the app, coming back to the tab —
+    /// fire far more often than a library actually changes, and ``load()`` over a large one is a
+    /// walk of a hundred requests rather than a single fetch. A minute is long enough that flicking
+    /// between apps or tabs costs nothing, and short enough that a photograph added on the web is
+    /// there by the time somebody has picked the phone up and looked at it.
+    static let staleAfter: TimeInterval = 60
+
+    /// Re-reads the library if what is on screen has had time to go stale.
+    ///
+    /// ## What this is for
+    ///
+    /// Issue #13: the timeline was read once per launch, and after that only on a pull to refresh
+    /// or when a local import finished. Both of those are things *this device* did — so a
+    /// photograph added from the web app, from a second phone, or by a backup running somewhere
+    /// else stayed invisible for the rest of the session, with nothing on screen to suggest the
+    /// grid was old. Pull to refresh fixed it, for the people who thought to try it.
+    ///
+    /// ## What it declines to do
+    ///
+    /// Start a walk over one already running, or a second one inside a minute. A refresh over a
+    /// timeline that is already on screen swaps it only when the walk *finishes* — see
+    /// ``fillIn(after:streamingIntoTheTimeline:)`` — so overlapping walks would be cost with
+    /// nothing to show for it, and the later one would finish holding the older answer.
+    ///
+    /// - Parameter now: injected by the tests, which have to be able to age a timeline without
+    ///   waiting a minute for one.
+    func refreshIfStale(now: Date = Date()) async {
+        guard !isLoading, !isFillingIn else { return }
+        // Never read, or read and failed: there is no timeline to protect and every reason to try
+        // again. This is also the path a launch with no signal takes once it has signal.
+        guard let lastLoadedAt else {
+            await load()
+            return
+        }
+        guard now.timeIntervalSince(lastLoadedAt) >= Self.staleAfter else { return }
+        await load()
+    }
+
     private func performLoad() async {
         await hydrateIfNeeded()
 
