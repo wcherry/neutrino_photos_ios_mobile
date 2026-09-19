@@ -9,5 +9,10 @@
 		<string>webcredentials:www.getneutrino.app</string>
 		<string>webcredentials:getneutrino.app</string>
 	</array>
+	<key>keychain-access-groups</key>
+	<array>
+		<string>$(AppIdentifierPrefix)$(CFBundleIdentifier)</string>
+		<string>$(AppIdentifierPrefix)com.neutrino.shared</string>
+	</array>
 </dict>
 </plist>
