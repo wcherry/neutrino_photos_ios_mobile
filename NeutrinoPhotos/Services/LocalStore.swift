@@ -132,6 +132,23 @@ actor LocalStore {
         """
         ALTER TABLE photo ADD COLUMN deleted_at REAL;
         """,
+
+        // 4 — where a thumbnail is fetched from, rather than the thumbnail itself (issue #12).
+        //
+        // The server stopped sending inline base64 in issue #175 and now hands out a URL, so the
+        // two columns that held the bytes are dead — and they are not a small dead weight. A
+        // cached library of 20,000 photographs carried roughly 30 KB of base64 each, which is most
+        // of this database. `thumbnail` is emptied rather than dropped: `ALTER TABLE ... DROP
+        // COLUMN` needs SQLite 3.35, which is newer than the deployment target guarantees, and a
+        // nulled column costs a name in one CREATE statement nobody reads.
+        //
+        // No backfill. The URL is not derivable from what the row holds — it carries a cache token
+        // taken from the file's `updated_at` — so an item cached by an older build draws its
+        // placeholder for as long as it takes the next listing to arrive, which is one request.
+        """
+        ALTER TABLE photo ADD COLUMN thumbnail_url TEXT;
+        UPDATE photo SET thumbnail = NULL, thumbnail_mime_type = NULL;
+        """,
     ]
 
     /// What ``migrations`` adds up to. Asserted in tests so an appended migration that forgets to
@@ -286,7 +303,7 @@ actor LocalStore {
         // The index is (is_trashed, is_archived, timeline_date DESC), so this is a range scan in
         // index order with no sort step — which is the whole reason the column exists.
         let sql = """
-        SELECT id, file_id, file_name, mime_type, size_bytes, thumbnail, thumbnail_mime_type,
+        SELECT id, file_id, file_name, mime_type, size_bytes, thumbnail_url,
                is_starred, is_archived, capture_date, created_at, updated_at, metadata, deleted_at
         FROM photo WHERE is_trashed = ? ORDER BY timeline_date DESC;
         """
@@ -302,10 +319,10 @@ actor LocalStore {
     private func insert(_ item: MediaItem, trashed: Bool) throws {
         let sql = """
         INSERT OR REPLACE INTO photo
-            (id, file_id, file_name, mime_type, size_bytes, thumbnail, thumbnail_mime_type,
+            (id, file_id, file_name, mime_type, size_bytes, thumbnail_url,
              is_starred, is_archived, is_trashed, capture_date, created_at, updated_at,
              timeline_date, metadata, deleted_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
         """
         try run(sql) { statement in
             bind(statement, 1, item.id)
@@ -313,17 +330,16 @@ actor LocalStore {
             bind(statement, 3, item.fileName)
             bind(statement, 4, item.mimeType)
             sqlite3_bind_int64(statement, 5, item.sizeBytes)
-            bind(statement, 6, item.thumbnailBase64)
-            bind(statement, 7, item.thumbnailMIMEType)
-            sqlite3_bind_int(statement, 8, item.isStarred ? 1 : 0)
-            sqlite3_bind_int(statement, 9, item.isArchived ? 1 : 0)
-            sqlite3_bind_int(statement, 10, trashed ? 1 : 0)
-            bind(statement, 11, item.captureDate?.timeIntervalSince1970)
-            sqlite3_bind_double(statement, 12, item.createdAt.timeIntervalSince1970)
-            sqlite3_bind_double(statement, 13, item.updatedAt.timeIntervalSince1970)
-            sqlite3_bind_double(statement, 14, item.timelineDate.timeIntervalSince1970)
-            bind(statement, 15, item.metadata.flatMap(Self.encodeMetadata))
-            bind(statement, 16, item.deletedAt?.timeIntervalSince1970)
+            bind(statement, 6, item.thumbnailURL)
+            sqlite3_bind_int(statement, 7, item.isStarred ? 1 : 0)
+            sqlite3_bind_int(statement, 8, item.isArchived ? 1 : 0)
+            sqlite3_bind_int(statement, 9, trashed ? 1 : 0)
+            bind(statement, 10, item.captureDate?.timeIntervalSince1970)
+            sqlite3_bind_double(statement, 11, item.createdAt.timeIntervalSince1970)
+            sqlite3_bind_double(statement, 12, item.updatedAt.timeIntervalSince1970)
+            sqlite3_bind_double(statement, 13, item.timelineDate.timeIntervalSince1970)
+            bind(statement, 14, item.metadata.flatMap(Self.encodeMetadata))
+            bind(statement, 15, item.deletedAt?.timeIntervalSince1970)
         }
     }
 
@@ -345,15 +361,14 @@ actor LocalStore {
             fileName: text(statement, 2) ?? "",
             mimeType: text(statement, 3) ?? "application/octet-stream",
             sizeBytes: sqlite3_column_int64(statement, 4),
-            thumbnailBase64: text(statement, 5),
-            thumbnailMIMEType: text(statement, 6),
-            isStarred: sqlite3_column_int(statement, 7) != 0,
-            isArchived: sqlite3_column_int(statement, 8) != 0,
-            captureDate: date(statement, 9),
-            createdAt: date(statement, 10) ?? Date(timeIntervalSince1970: 0),
-            updatedAt: date(statement, 11) ?? Date(timeIntervalSince1970: 0),
-            deletedAt: date(statement, 13),
-            metadata: text(statement, 12).flatMap(decodeMetadata)
+            thumbnailURL: text(statement, 5),
+            isStarred: sqlite3_column_int(statement, 6) != 0,
+            isArchived: sqlite3_column_int(statement, 7) != 0,
+            captureDate: date(statement, 8),
+            createdAt: date(statement, 9) ?? Date(timeIntervalSince1970: 0),
+            updatedAt: date(statement, 10) ?? Date(timeIntervalSince1970: 0),
+            deletedAt: date(statement, 12),
+            metadata: text(statement, 11).flatMap(decodeMetadata)
         )
     }
 

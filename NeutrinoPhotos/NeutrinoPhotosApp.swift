@@ -61,7 +61,10 @@ struct NeutrinoPhotosApp: App {
         let api = APIClient()
         let store = try? LocalStore.makeDefault()
         let drive = PhotosDriveService(api: api, store: store)
-        let thumbnails = ThumbnailCache()
+        // Given the client, because a cover thumbnail is a fetch now rather than bytes riding along
+        // in the listing — see `ThumbnailCache`. Without it every cell the disk cache has never
+        // seen draws a placeholder, which is what issue #12 was.
+        let thumbnails = ThumbnailCache(fetcher: api)
         let library = PhotoLibraryService(api: api, store: store)
         let content = MediaContentService(api: api, store: store, drive: drive,
                                           thumbnails: thumbnails)

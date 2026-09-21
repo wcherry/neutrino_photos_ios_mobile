@@ -171,7 +171,7 @@ enum Fixture {
                      fileName: String = "IMG_0001.jpg",
                      mimeType: String = "image/jpeg",
                      sizeBytes: Int64 = 2_400_000,
-                     thumbnailBase64: String? = nil,
+                     thumbnailURL: String? = nil,
                      isStarred: Bool = false,
                      isArchived: Bool = false,
                      captureDate: Date? = Date(timeIntervalSince1970: 1_700_000_000),
@@ -179,8 +179,7 @@ enum Fixture {
                      deletedAt: Date? = nil,
                      metadata: MediaMetadata? = nil) -> MediaItem {
         MediaItem(id: id, fileID: fileID, fileName: fileName, mimeType: mimeType,
-                  sizeBytes: sizeBytes, thumbnailBase64: thumbnailBase64,
-                  thumbnailMIMEType: thumbnailBase64 == nil ? nil : "image/jpeg",
+                  sizeBytes: sizeBytes, thumbnailURL: thumbnailURL,
                   isStarred: isStarred, isArchived: isArchived, captureDate: captureDate,
                   createdAt: createdAt, updatedAt: createdAt, deletedAt: deletedAt,
                   metadata: metadata)
@@ -201,20 +200,19 @@ enum Fixture {
                           fileName: String = "IMG_0001.jpg",
                           mimeType: String = "image/jpeg",
                           sizeBytes: Int = 2_400_000,
-                          thumbnail: String? = nil,
+                          thumbnailURL: String? = nil,
                           isStarred: Bool = false,
                           isArchived: Bool = false,
                           captureDate: Date? = Date(timeIntervalSince1970: 1_700_000_000),
                           createdAt: Date = Date(timeIntervalSince1970: 1_700_100_000),
                           deletedAt: Date? = nil) -> String {
-        let thumbnailField = thumbnail.map { "\"\($0)\"" } ?? "null"
-        let thumbnailMIME = thumbnail == nil ? "null" : "\"image/jpeg\""
+        let thumbnailField = thumbnailURL.map { "\"\($0)\"" } ?? "null"
         let capture = captureDate.map { "\"\(rfc3339($0))\"" } ?? "null"
         let deleted = deletedAt.map { "\"\(rfc3339($0))\"" } ?? "null"
         return """
         {"id":"\(id)","fileId":"\(fileID)","fileName":"\(fileName)","mimeType":"\(mimeType)",
          "sizeBytes":\(sizeBytes),"contentUrl":"/api/v1/drive/files/\(fileID)",
-         "thumbnail":\(thumbnailField),"thumbnailMimeType":\(thumbnailMIME),
+         "thumbnailUrl":\(thumbnailField),
          "isStarred":\(isStarred),"isArchived":\(isArchived),"captureDate":\(capture),
          "createdAt":"\(rfc3339(createdAt))","updatedAt":"\(rfc3339(createdAt))",
          "deletedAt":\(deleted),"metadata":null}

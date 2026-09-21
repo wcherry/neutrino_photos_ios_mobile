@@ -33,7 +33,8 @@ final class PhotoLibraryServiceTests: XCTestCase {
 
     func testLoadDecodesTheListing() async {
         MockURLProtocol.respond(data: Fixture.listingJSON([
-            Fixture.photoJSON(id: "a", fileID: "file-a", thumbnail: "AAAA"),
+            Fixture.photoJSON(id: "a", fileID: "file-a",
+                              thumbnailURL: "/api/v1/drive/files/file-a/thumbnail?v=1"),
             Fixture.photoJSON(id: "b", fileID: "file-b", isStarred: true),
         ]))
 
@@ -41,7 +42,8 @@ final class PhotoLibraryServiceTests: XCTestCase {
 
         XCTAssertEqual(sut.allItems.count, 2)
         XCTAssertEqual(sut.allItems.first?.fileID, "file-a")
-        XCTAssertEqual(sut.allItems.first?.thumbnailBase64, "AAAA")
+        XCTAssertEqual(sut.allItems.first?.thumbnailURL,
+                       "/api/v1/drive/files/file-a/thumbnail?v=1")
         XCTAssertEqual(sut.favorites.map(\.id), ["b"])
         XCTAssertNil(sut.error)
         XCTAssertNotNil(sut.lastLoadedAt)
@@ -327,6 +329,83 @@ final class PhotoLibraryServiceTests: XCTestCase {
 
         XCTAssertEqual(MockURLProtocol.requestCount, 2,
                        "coalescing is for requests in flight, not a refresh the user asked for")
+    }
+
+    // MARK: - Staying current (issue #13)
+
+    func testAStaleTimelineIsReadAgain() async {
+        MockURLProtocol.respond(data: Fixture.listingJSON([Fixture.photoJSON(id: "a")]))
+        await sut.loadEverything()
+        XCTAssertEqual(MockURLProtocol.requestCount, 1)
+
+        MockURLProtocol.respond(data: Fixture.listingJSON([
+            Fixture.photoJSON(id: "a"),
+            Fixture.photoJSON(id: "b", fileID: "file-b"),
+        ]))
+        await sut.refreshIfStale(now: Date().addingTimeInterval(PhotoLibraryService.staleAfter + 1))
+        await sut.loadEverything()
+
+        XCTAssertEqual(sut.allItems.map(\.id).sorted(), ["a", "b"],
+                       "a photograph added from the web app has to reach the grid on its own")
+    }
+
+    func testAFreshTimelineIsLeftAlone() async {
+        MockURLProtocol.respond(data: Fixture.listingJSON([Fixture.photoJSON(id: "a")]))
+        await sut.loadEverything()
+
+        // Four reasons to look again inside a minute: coming back to the app, coming back to the
+        // tab, and twice more because somebody is flicking between them.
+        for _ in 0..<4 {
+            await sut.refreshIfStale(now: Date().addingTimeInterval(PhotoLibraryService.staleAfter - 1))
+        }
+
+        XCTAssertEqual(MockURLProtocol.requestCount, 1,
+                       "the throttle is what keeps a tab tap from walking a 25,000 photo library")
+    }
+
+    /// The path a launch with no signal takes once it has signal: nothing was ever read, so there
+    /// is no timeline to protect and every reason to try again.
+    func testALibraryThatWasNeverReadIsReadOnTheFirstChance() async {
+        MockURLProtocol.respond(data: Fixture.listingJSON([Fixture.photoJSON(id: "a")]))
+
+        await sut.refreshIfStale()
+        await sut.loadEverything()
+
+        XCTAssertEqual(sut.allItems.map(\.id), ["a"])
+    }
+
+    func testAFailedLoadIsRetriedRatherThanTreatedAsFresh() async {
+        MockURLProtocol.fail(with: .notConnectedToInternet)
+        await sut.load()
+        let afterFailure = MockURLProtocol.requestCount
+
+        MockURLProtocol.respond(data: Fixture.listingJSON([Fixture.photoJSON(id: "a")]))
+        await sut.refreshIfStale()
+        await sut.loadEverything()
+
+        XCTAssertGreaterThan(MockURLProtocol.requestCount, afterFailure)
+        XCTAssertEqual(sut.allItems.map(\.id), ["a"],
+                       "a load that never landed leaves no `lastLoadedAt` to age out of")
+    }
+
+    /// A walk over a large library takes minutes, and backgrounding the app during one is ordinary.
+    /// Starting a second walk on top would cost a hundred requests and finish holding the *older*
+    /// answer — see `fillIn`, which replaces the timeline only when it completes.
+    func testARefreshDoesNotStartASecondWalkOverOneAlreadyRunning() async {
+        let photos = (0..<400).map { Fixture.photoJSON(id: "p\($0)", fileID: "file-\($0)") }
+        MockURLProtocol.respondWithPagedListing(photos)
+
+        // The first page only, so the fill is still walking when the refresh arrives.
+        await sut.load()
+        XCTAssertTrue(sut.isFillingIn)
+        let duringTheWalk = MockURLProtocol.requestCount
+
+        await sut.refreshIfStale(now: Date().addingTimeInterval(PhotoLibraryService.staleAfter + 1))
+
+        XCTAssertLessThanOrEqual(MockURLProtocol.requestCount, duringTheWalk + 1,
+                                 "the refresh should have declined, leaving the walk to finish")
+        await sut.loadEverything()
+        XCTAssertEqual(sut.allItems.count, 400)
     }
 
     // MARK: - Filtering

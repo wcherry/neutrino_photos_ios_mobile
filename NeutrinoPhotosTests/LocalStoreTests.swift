@@ -115,7 +115,8 @@ final class LocalStoreTests: XCTestCase {
                             gpsLatitude: 51.5, gpsLongitude: -0.12,
                             datetimeOriginal: "2024:06:01 10:00:00"))
         let item = Fixture.item(id: "p1", fileID: "f1", fileName: "IMG_1.jpg",
-                                thumbnailBase64: "AAAA", isStarred: true, isArchived: true,
+                                thumbnailURL: "/api/v1/drive/files/f1/thumbnail?v=7",
+                                isStarred: true, isArchived: true,
                                 metadata: metadata)
 
         try await store.save(item)
@@ -127,7 +128,7 @@ final class LocalStoreTests: XCTestCase {
         XCTAssertEqual(restored.fileName, item.fileName)
         XCTAssertEqual(restored.mimeType, item.mimeType)
         XCTAssertEqual(restored.sizeBytes, item.sizeBytes)
-        XCTAssertEqual(restored.thumbnailBase64, "AAAA")
+        XCTAssertEqual(restored.thumbnailURL, "/api/v1/drive/files/f1/thumbnail?v=7")
         XCTAssertTrue(restored.isStarred)
         XCTAssertTrue(restored.isArchived)
         XCTAssertEqual(restored.captureDate?.timeIntervalSince1970,
