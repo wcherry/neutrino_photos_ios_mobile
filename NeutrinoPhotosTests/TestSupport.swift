@@ -225,6 +225,26 @@ enum Fixture {
         """.utf8)
     }
 
+    /// One file from Drive's flat listing, which serializes its timestamps zone-less.
+    static func driveFileJSON(id: String, name: String = "IMG_0002.jpg",
+                              mimeType: String = "image/jpeg",
+                              createdAt: Date = Date(timeIntervalSince1970: 1_700_200_000)) -> String {
+        let stamp = DriveDate.naiveUTCString(from: createdAt)
+        return """
+        {"id":"\(id)","name":"\(name)","sizeBytes":1000,"mimeType":"\(mimeType)","folderId":null,
+         "isStarred":false,"createdAt":"\(stamp)","updatedAt":"\(stamp)",
+         "coverThumbnailUrl":"/api/v1/drive/files/\(id)/thumbnail?v=1","tags":[],
+         "encryptedMetadata":null,"contentVersion":1}
+        """
+    }
+
+    /// `GET /api/v1/drive/files` — the whole listing on one page.
+    static func driveListingJSON(_ files: [String]) -> Data {
+        Data("""
+        {"files":[\(files.joined(separator: ","))],"total":\(files.count),"limit":200,"offset":0}
+        """.utf8)
+    }
+
     /// One `AlbumResponse`.
     static func albumJSON(id: String = "album-1",
                           title: String = "Trip",

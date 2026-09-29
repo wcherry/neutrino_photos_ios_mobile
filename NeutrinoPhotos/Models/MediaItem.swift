@@ -113,6 +113,17 @@ struct MediaItem: Identifiable, Hashable {
     /// The paired video's Drive file, for a Live Photo whose motion this account holds.
     var liveVideoFileID: String? { metadata?.device?.liveVideoFileID }
 
+    /// An image that is in Drive but has no photo record yet — see ``init(driveFile:)``.
+    ///
+    /// Anything that addresses the photo record has to register it first — see
+    /// ``PhotoLibraryService/registered(_:)``.
+    var isDriveOnly: Bool { id.hasPrefix(Self.driveOnlyIDPrefix) }
+
+    /// What a Drive-only item's id starts with. The server's ids are bare UUIDs, so no record can
+    /// be mistaken for one; and it is part of the id rather than a separate flag so the device's
+    /// copy of the library stores it without a schema change.
+    static let driveOnlyIDPrefix = "drive:"
+
     // MARK: - Init
 
     init(id: String, fileID: String, fileName: String, mimeType: String, sizeBytes: Int64,
@@ -133,6 +144,20 @@ struct MediaItem: Identifiable, Hashable {
         self.updatedAt = updatedAt
         self.deletedAt = deletedAt
         self.metadata = metadata
+    }
+
+    /// An image in Drive that was never registered as a photo.
+    ///
+    /// The web library lists every image in Drive, so a picture uploaded through Drive, the photo
+    /// editor, the desktop sync or the Drive app is in it — and has no photo record, because only
+    /// the Photos uploaders register one. Leaving those out made this library a different set from
+    /// the web one. They are shown with what Drive knows: no capture date, so they file under
+    /// when they arrived, and no favourite or archived flag, since those live on the record.
+    init(driveFile file: DriveFile) {
+        self.init(id: Self.driveOnlyIDPrefix + file.id, fileID: file.id,
+                  fileName: file.name, mimeType: file.mimeType,
+                  sizeBytes: file.sizeBytes, thumbnailURL: file.coverThumbnailURL,
+                  createdAt: file.createdAt, updatedAt: file.updatedAt)
     }
 }
 

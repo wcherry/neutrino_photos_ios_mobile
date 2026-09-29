@@ -75,6 +75,7 @@ struct PhotoDetailView: View {
             if let current {
                 AlbumPickerView(item: current)
                     .environmentObject(albums)
+                    .environmentObject(library)
             }
         }
         .alert(saveOutcome?.title ?? "", isPresented: saveAlertBinding) {

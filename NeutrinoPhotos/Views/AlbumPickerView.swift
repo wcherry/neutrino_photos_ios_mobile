@@ -26,6 +26,7 @@ struct AlbumPickerView: View {
     var onAdded: (() -> Void)?
 
     @EnvironmentObject private var albums: AlbumService
+    @EnvironmentObject private var library: PhotoLibraryService
     @Environment(\.dismiss) private var dismiss
 
     @State private var newAlbumTitle = ""
@@ -148,7 +149,10 @@ struct AlbumPickerView: View {
         Task {
             do {
                 let albumID = try await resolveAlbumID()
-                let result = await albums.add(photoIDs: items.map(\.id), to: albumID)
+                // Album membership is kept on the photo record, which an image that is only in
+                // Drive does not have until it is registered.
+                let records = try await library.registered(items)
+                let result = await albums.add(photoIDs: records.map(\.id), to: albumID)
                 progress = nil
                 if result.isCompleteSuccess {
                     onAdded?()

@@ -102,6 +102,15 @@ final class PhotoLibraryService: ObservableObject {
     /// it is superseding, and so ``loadEverything()`` has something to wait on.
     private var fillTask: Task<Void, Never>?
 
+    /// Registrations of Drive-only items in flight, keyed by the Drive-only id, so two changes
+    /// made to one before the first has registered it share a registration. The server does not
+    /// refuse a second record for the same file; it would make the photo appear twice.
+    private var registrations: [String: Task<MediaItem, Error>] = [:]
+
+    /// The record each Drive-only item has been registered as, keyed by the Drive-only id — see
+    /// ``registered(_:)``.
+    private var registeredRecords: [String: MediaItem] = [:]
+
     /// No key-decoding strategy: the Photos endpoints already serialize camelCase
     /// (`#[serde(rename_all = "camelCase")]`). Timestamps arrive as RFC 3339 from `to_rfc3339()`,
     /// which `DriveDate` reads alongside Drive's zone-less shape.
@@ -177,14 +186,18 @@ final class PhotoLibraryService: ObservableObject {
             .sorted { $0.createdAt > $1.createdAt }
     }
 
+    /// The item with this id, following a Drive-only item to the record it was registered as — a
+    /// viewer opened on the Drive-only copy keeps asking for that id after the record replaces it.
     func item(id: String) -> MediaItem? {
-        allItems.first { $0.id == id } ?? trashItems.first { $0.id == id }
+        let id = registeredRecords[id]?.id ?? id
+        return allItems.first { $0.id == id } ?? trashItems.first { $0.id == id }
     }
 
     /// Whether this Drive file has already been registered as a photo — the check that keeps a
     /// second import of the same camera roll from doubling the library.
     func containsFile(id fileID: String) -> Bool {
-        allItems.contains { $0.fileID == fileID } || trashItems.contains { $0.fileID == fileID }
+        allItems.contains { $0.fileID == fileID && !$0.isDriveOnly }
+            || trashItems.contains { $0.fileID == fileID }
     }
 
     // MARK: - Loading
@@ -414,6 +427,12 @@ final class PhotoLibraryService: ObservableObject {
         var collected = first.photos
         var seen = Set(first.photos.map(\.id))
 
+        // Read beside the record walk rather than after it, so a large library does not wait for
+        // the records to finish before the Drive listing starts. `try?` because either failing
+        // costs the Drive-only items, not the library — see `driveOnlyItems`.
+        async let driveImages = try? allDriveImages()
+        async let trashedFileIDs = try? fetchTrashedFileIDs()
+
         // `isFillingIn` is owned by ``startFillingIn(after:streamingIntoTheTimeline:)`` rather than
         // deferred here, for the same reason the task checks its identity: a superseded walk
         // finishing after its replacement started would otherwise clear the flag out from under a
@@ -443,11 +462,29 @@ final class PhotoLibraryService: ObservableObject {
                 if next.photos.count < Self.pageSize { break }
             }
 
-            let merged = mergingDeviceOnlyMetadata(into: collected)
+            // The Drive-only items already on screen stay until the Drive listing says otherwise,
+            // or a refresh would blink them out for as long as that listing takes.
+            let records = mergingDeviceOnlyMetadata(into: collected)
+            let recordFileIDs = Set(records.map(\.fileID))
+            let merged = records
+                + allItems.filter { $0.isDriveOnly && !recordFileIDs.contains($0.fileID) }
             allItems = merged
             libraryTotal = merged.count
             logger.debug("fill complete: \(merged.count) items")
             try? await store?.replaceLibrary(with: merged)
+
+            // Merged into the library as it is *now*, not as the walk left it: the Drive listing
+            // can land well after the records, and a favourite or a delete made in between must
+            // not be overwritten by it.
+            let images = await driveImages
+            let trashed = await trashedFileIDs
+            try Task.checkCancellation()
+            let current = allItems.filter { !$0.isDriveOnly }
+            let withDriveOnly = current
+                + driveOnlyItems(from: images, trashedFileIDs: trashed, records: current)
+            allItems = withDriveOnly
+            libraryTotal = withDriveOnly.count
+            try? await store?.replaceLibrary(with: withDriveOnly)
         } catch where error.isCancellation {
             // A refresh replaced this walk, or the app is going away. Whatever arrived stays: it is
             // a real part of the library, and the walk that superseded this one is already running.
@@ -460,6 +497,109 @@ final class PhotoLibraryService: ObservableObject {
             logger.error("fill failed at \(collected.count) items: \(error, privacy: .public)")
             self.error = error.localizedDescription
         }
+    }
+
+    // MARK: - Drive-only images
+
+    /// Every image in the account's Drive, wherever it is filed — the listing the web library is
+    /// built from (`/api/v1/drive/files?type=photo`, which the server matches as `image/%`).
+    private func allDriveImages() async throws -> [DriveFile] {
+        var files: [DriveFile] = []
+        var seen = Set<String>()
+        for page in 0..<Self.maxPages {
+            try Task.checkCancellation()
+            let next: APIListDriveFilesResponse = try await api.get(
+                "/api/v1/drive/files?type=photo&orderBy=createdAt&direction=desc"
+                    + "&limit=\(Self.pageSize)&offset=\(page * Self.pageSize)",
+                decoder: Self.decoder)
+            files.append(contentsOf: next.files.filter { seen.insert($0.id).inserted })
+            if files.count >= next.total || next.files.count < Self.pageSize { break }
+        }
+        return files
+    }
+
+    /// The Drive files behind the photos in Recently Deleted.
+    ///
+    /// Trashing a photo only stamps its record; the Drive file stays live, so without this every
+    /// photo in the trash would come straight back into the timeline as a Drive-only item.
+    private func fetchTrashedFileIDs() async throws -> Set<String> {
+        let response: APIListPhotosResponse =
+            try await api.get("/api/v1/photos/trash", decoder: Self.decoder)
+        return Set(response.photos.map(\.fileID))
+    }
+
+    /// The images in Drive that no photo record accounts for, as library items.
+    ///
+    /// Left out besides the registered ones: files behind trashed photos, files this device has
+    /// registered since the walk read their page, and the preview renditions this app files in
+    /// Drive itself — a JPEG per photograph, which would otherwise show every picture twice.
+    ///
+    /// Either listing missing means the answer cannot be trusted — without the trash a deleted
+    /// photo would reappear — so the Drive-only items already on screen are kept as they were,
+    /// less any that have since been registered.
+    private func driveOnlyItems(from driveImages: [DriveFile]?, trashedFileIDs: Set<String>?,
+                                records: [MediaItem]) -> [MediaItem] {
+        var accounted = Set(records.map(\.fileID))
+        accounted.formUnion(registeredRecords.values.map(\.fileID))
+        accounted.formUnion(trashItems.map(\.fileID))
+
+        guard let driveImages, let trashedFileIDs else {
+            logger.error("Drive listing unavailable; keeping the Drive-only items already shown")
+            return allItems.filter { $0.isDriveOnly && !accounted.contains($0.fileID) }
+        }
+        accounted.formUnion(trashedFileIDs)
+
+        let items = driveImages
+            .filter { !accounted.contains($0.id) }
+            .filter { MediaRendition.originalFileID(fromRenditionName: $0.name) == nil }
+            .map(MediaItem.init(driveFile:))
+        logger.debug("Drive-only images: \(items.count)")
+        return items
+    }
+
+    // MARK: - Registering Drive-only items
+
+    /// The photo record behind an item, registering a Drive-only one first.
+    ///
+    /// Favouriting, archiving, trashing and album membership all live on the photo record, so a
+    /// Drive-only item has to become one before any of them can be applied. Once registered, the
+    /// record takes the Drive-only item's place in the library; a registered or in-flight item is
+    /// never registered a second time.
+    func registered(_ item: MediaItem) async throws -> MediaItem {
+        guard item.isDriveOnly else { return item }
+        if let record = registeredRecords[item.id] { return record }
+        if let pending = registrations[item.id] { return try await pending.value }
+
+        let body = APIRegisterPhotoRequest(fileId: item.fileID, captureDate: nil)
+        let task = Task { @MainActor [api] () throws -> MediaItem in
+            try await api.post("/api/v1/photos", body: body, decoder: Self.decoder)
+        }
+        registrations[item.id] = task
+        defer { registrations[item.id] = nil }
+
+        let record = try await task.value
+        registeredRecords[item.id] = record
+        if let index = allItems.firstIndex(where: { $0.id == item.id }) {
+            allItems[index] = record
+            try? await store?.save(record)
+        }
+        if let index = trashItems.firstIndex(where: { $0.id == item.id }) {
+            var trashed = record
+            trashed.deletedAt = trashItems[index].deletedAt
+            trashItems[index] = trashed
+        }
+        try? await store?.delete(id: item.id)
+        logger.debug("registered Drive-only \(item.fileID, privacy: .public) as \(record.id, privacy: .public)")
+        return record
+    }
+
+    /// The same for several items, one at a time, in order.
+    func registered(_ items: [MediaItem]) async throws -> [MediaItem] {
+        var records: [MediaItem] = []
+        for item in items {
+            records.append(try await registered(item))
+        }
+        return records
     }
 
     /// Writes a batch to the device's copy, yielding between items.
@@ -540,6 +680,8 @@ final class PhotoLibraryService: ObservableObject {
 
         allItems = []
         trashItems = []
+        registrations = [:]
+        registeredRecords = [:]
         isHydrated = false
         libraryTotal = nil
         try? await store?.clear()
@@ -669,16 +811,28 @@ final class PhotoLibraryService: ObservableObject {
         apply(&allItems[index])
 
         Task {
+            // What to put back on failure: the item as it was, or — once a Drive-only item has
+            // been registered — the fresh record, which is what the server now holds.
+            var fallback = previous
             do {
-                let updated: MediaItem = try await api.patch("/api/v1/photos/\(id)", body: body,
-                                                             decoder: Self.decoder)
+                let record = try await registered(previous)
+                if record.id != previous.id {
+                    fallback = record
+                    // Registering swapped in the server's record, which has not had the change
+                    // applied; apply it again so the tap stays visible while the PATCH runs.
+                    if let index = allItems.firstIndex(where: { $0.id == record.id }) {
+                        apply(&allItems[index])
+                    }
+                }
+                let updated: MediaItem = try await api.patch("/api/v1/photos/\(record.id)",
+                                                             body: body, decoder: Self.decoder)
                 if let merged = replaceKeepingLocalMetadata(with: updated) {
                     try? await store?.save(merged)
                 }
             } catch {
                 logger.error("update failed: id=\(id, privacy: .public) \(error, privacy: .public)")
-                if let index = allItems.firstIndex(where: { $0.id == id }) {
-                    allItems[index] = previous
+                if let index = allItems.firstIndex(where: { $0.id == fallback.id }) {
+                    allItems[index] = fallback
                 }
                 self.error = error.localizedDescription
             }
@@ -701,14 +855,19 @@ final class PhotoLibraryService: ObservableObject {
         trashItems.insert(item, at: 0)
 
         Task {
+            // A Drive-only item has no record to trash until it is registered; `registered`
+            // swaps the record into `trashItems` in its place.
+            var trashed = item
             do {
-                _ = try await api.send(method: "DELETE", path: "/api/v1/photos/\(id)")
-                try? await store?.save(item, trashed: true)
-                logger.debug("trash succeeded: id=\(id, privacy: .public)")
+                trashed = try await registered(item)
+                trashed.deletedAt = deletedAt
+                _ = try await api.send(method: "DELETE", path: "/api/v1/photos/\(trashed.id)")
+                try? await store?.save(trashed, trashed: true)
+                logger.debug("trash succeeded: id=\(trashed.id, privacy: .public)")
             } catch {
                 logger.error("trash failed: id=\(id, privacy: .public) \(error, privacy: .public)")
-                trashItems.removeAll { $0.id == id }
-                var restored = item
+                trashItems.removeAll { $0.id == trashed.id }
+                var restored = trashed
                 restored.deletedAt = nil
                 allItems.append(restored)
                 self.error = error.localizedDescription
@@ -784,6 +943,12 @@ final class PhotoLibraryService: ObservableObject {
 
 private struct APIListPhotosResponse: Decodable {
     let photos: [MediaItem]
+    let total: Int
+}
+
+/// `GET /api/v1/drive/files` — `files` and the count of everything the filter matches.
+private struct APIListDriveFilesResponse: Decodable {
+    let files: [DriveFile]
     let total: Int
 }
 
