@@ -148,6 +148,7 @@ struct LibraryView: View {
             // failed, leaves the selection exactly as it was so the user can retry it.
             AlbumPickerView(items: target.items) { selection.end() }
                 .environmentObject(albums)
+                .environmentObject(library)
         }
         .confirmationDialog("Delete \(selection.count) item(s)?",
                             isPresented: $showsBulkDeleteConfirmation, titleVisibility: .visible) {

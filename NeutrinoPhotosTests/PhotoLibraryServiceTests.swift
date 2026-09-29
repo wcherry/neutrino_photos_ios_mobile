@@ -146,7 +146,7 @@ final class PhotoLibraryServiceTests: XCTestCase {
         XCTAssertEqual(sut.allItems.count, 1250)
         XCTAssertEqual(Set(sut.allItems.map(\.id)).count, 1250, "paging must not repeat a photo")
         XCTAssertNil(sut.error)
-        XCTAssertGreaterThan(MockURLProtocol.requestCount, 1, "it should have taken several pages")
+        XCTAssertGreaterThan(MockURLProtocol.listingRequestCount, 1, "it should have taken several pages")
     }
 
     func testTheOrderTheServerSentIsPreservedAcrossPageBoundaries() async {
@@ -168,7 +168,7 @@ final class PhotoLibraryServiceTests: XCTestCase {
 
         await sut.load()
 
-        XCTAssertEqual(MockURLProtocol.requestCount, 1, "the reader waited on more than one request")
+        XCTAssertEqual(MockURLProtocol.listingRequestCount, 1, "the reader waited on more than one request")
         XCTAssertEqual(sut.allItems.count, 200, "a page should be on screen")
         XCTAssertFalse(sut.isLoading, "the grid is usable, so nothing should still read as loading")
         XCTAssertEqual(sut.libraryTotal, 25_000, "the whole library's count, not the page's")
@@ -278,7 +278,7 @@ final class PhotoLibraryServiceTests: XCTestCase {
         await sut.load()
 
         XCTAssertEqual(sut.allItems.map(\.id), ["only"])
-        XCTAssertEqual(MockURLProtocol.requestCount, 1)
+        XCTAssertEqual(MockURLProtocol.listingRequestCount, 1)
     }
 
     func testAnEmptyLibraryTakesOneRequestAndReportsNoError() async {
@@ -287,7 +287,7 @@ final class PhotoLibraryServiceTests: XCTestCase {
         await sut.load()
 
         XCTAssertTrue(sut.allItems.isEmpty)
-        XCTAssertEqual(MockURLProtocol.requestCount, 1)
+        XCTAssertEqual(MockURLProtocol.listingRequestCount, 1)
         XCTAssertNil(sut.error)
     }
 
@@ -318,7 +318,7 @@ final class PhotoLibraryServiceTests: XCTestCase {
         async let second: Void = sut.load()
         _ = await (first, second)
 
-        XCTAssertEqual(MockURLProtocol.requestCount, 1, "the second caller should wait, not refetch")
+        XCTAssertEqual(MockURLProtocol.listingRequestCount, 1, "the second caller should wait, not refetch")
         XCTAssertEqual(sut.allItems.map(\.id), ["a"])
     }
 
@@ -327,7 +327,7 @@ final class PhotoLibraryServiceTests: XCTestCase {
         await sut.load()
         await sut.load()
 
-        XCTAssertEqual(MockURLProtocol.requestCount, 2,
+        XCTAssertEqual(MockURLProtocol.listingRequestCount, 2,
                        "coalescing is for requests in flight, not a refresh the user asked for")
     }
 
@@ -336,7 +336,7 @@ final class PhotoLibraryServiceTests: XCTestCase {
     func testAStaleTimelineIsReadAgain() async {
         MockURLProtocol.respond(data: Fixture.listingJSON([Fixture.photoJSON(id: "a")]))
         await sut.loadEverything()
-        XCTAssertEqual(MockURLProtocol.requestCount, 1)
+        XCTAssertEqual(MockURLProtocol.listingRequestCount, 1)
 
         MockURLProtocol.respond(data: Fixture.listingJSON([
             Fixture.photoJSON(id: "a"),
@@ -359,7 +359,7 @@ final class PhotoLibraryServiceTests: XCTestCase {
             await sut.refreshIfStale(now: Date().addingTimeInterval(PhotoLibraryService.staleAfter - 1))
         }
 
-        XCTAssertEqual(MockURLProtocol.requestCount, 1,
+        XCTAssertEqual(MockURLProtocol.listingRequestCount, 1,
                        "the throttle is what keeps a tab tap from walking a 25,000 photo library")
     }
 
@@ -377,13 +377,13 @@ final class PhotoLibraryServiceTests: XCTestCase {
     func testAFailedLoadIsRetriedRatherThanTreatedAsFresh() async {
         MockURLProtocol.fail(with: .notConnectedToInternet)
         await sut.load()
-        let afterFailure = MockURLProtocol.requestCount
+        let afterFailure = MockURLProtocol.listingRequestCount
 
         MockURLProtocol.respond(data: Fixture.listingJSON([Fixture.photoJSON(id: "a")]))
         await sut.refreshIfStale()
         await sut.loadEverything()
 
-        XCTAssertGreaterThan(MockURLProtocol.requestCount, afterFailure)
+        XCTAssertGreaterThan(MockURLProtocol.listingRequestCount, afterFailure)
         XCTAssertEqual(sut.allItems.map(\.id), ["a"],
                        "a load that never landed leaves no `lastLoadedAt` to age out of")
     }
@@ -398,11 +398,11 @@ final class PhotoLibraryServiceTests: XCTestCase {
         // The first page only, so the fill is still walking when the refresh arrives.
         await sut.load()
         XCTAssertTrue(sut.isFillingIn)
-        let duringTheWalk = MockURLProtocol.requestCount
+        let duringTheWalk = MockURLProtocol.listingRequestCount
 
         await sut.refreshIfStale(now: Date().addingTimeInterval(PhotoLibraryService.staleAfter + 1))
 
-        XCTAssertLessThanOrEqual(MockURLProtocol.requestCount, duringTheWalk + 1,
+        XCTAssertLessThanOrEqual(MockURLProtocol.listingRequestCount, duringTheWalk + 1,
                                  "the refresh should have declined, leaving the walk to finish")
         await sut.loadEverything()
         XCTAssertEqual(sut.allItems.count, 400)
@@ -447,7 +447,7 @@ final class PhotoLibraryServiceTests: XCTestCase {
         XCTAssertEqual(item.id, "new")
         XCTAssertEqual(sut.allItems.first?.id, "new")
 
-        let body = try XCTUnwrap(MockURLProtocol.body(forPathContaining: "/photos"))
+        let body = try XCTUnwrap(MockURLProtocol.body(forPathContaining: "/photos", method: "POST"))
         let json = try XCTUnwrap(JSONSerialization.jsonObject(with: body) as? [String: Any])
         XCTAssertEqual(json["fileId"] as? String, "file-new")
         // `chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%dT%H:%M:%S")` accepts exactly this and
@@ -636,7 +636,6 @@ final class PhotoLibraryServiceTests: XCTestCase {
     func testDeletePermanentlyIgnoresAnItemThatIsNotInTheTrash() async {
         MockURLProtocol.respond(data: Fixture.listingJSON([Fixture.photoJSON(id: "live")]))
         await sut.load()
-        let before = MockURLProtocol.requestCount
 
         sut.deletePermanently(id: "live")
         await settle()
@@ -644,7 +643,8 @@ final class PhotoLibraryServiceTests: XCTestCase {
         // The two-step path through Recently Deleted is the whole point of having one; the app
         // refuses to short-circuit it even though the server would refuse too.
         XCTAssertEqual(sut.allItems.map(\.id), ["live"])
-        XCTAssertEqual(MockURLProtocol.requestCount, before, "no request should have gone out")
+        XCTAssertNil(MockURLProtocol.request { $0.httpMethod == "DELETE" },
+                     "no request should have gone out")
     }
 
     // MARK: - Recently Added
@@ -749,11 +749,10 @@ final class PhotoLibraryServiceTests: XCTestCase {
     func testAnEmptyRecordIsNeitherStoredNorSent() async {
         MockURLProtocol.respond(data: Fixture.listingJSON([Fixture.photoJSON(id: "a")]))
         await sut.load()
-        let before = MockURLProtocol.requestCount
 
         await sut.setMetadata(MediaMetadata(), forPhoto: "a", publishingLocation: true)
 
-        XCTAssertEqual(MockURLProtocol.requestCount, before)
+        XCTAssertNil(MockURLProtocol.request { $0.httpMethod == "PUT" })
         XCTAssertNil(sut.item(id: "a")?.metadata)
     }
 
@@ -792,7 +791,158 @@ final class PhotoLibraryServiceTests: XCTestCase {
         XCTAssertNil(sut.error, "an index write is not worth an error banner over the timeline")
     }
 
+    // MARK: - Images only in Drive
+
+    /// The web library is every image in Drive. One uploaded through Drive, the editor or the
+    /// desktop sync has no photo record, and used to be missing here.
+    func testAnImageOnlyInDriveJoinsTheLibrary() async {
+        serve(records: [Fixture.photoJSON(id: "a", fileID: "file-a")],
+              drive: [Fixture.driveFileJSON(id: "file-a"), Fixture.driveFileJSON(id: "file-b")])
+
+        await sut.loadEverything()
+
+        XCTAssertEqual(Set(sut.allItems.map(\.id)), ["a", "drive:file-b"])
+        let driveOnly = sut.item(id: "drive:file-b")
+        XCTAssertEqual(driveOnly?.isDriveOnly, true)
+        XCTAssertEqual(driveOnly?.fileID, "file-b")
+        XCTAssertEqual(driveOnly?.thumbnailURL, "/api/v1/drive/files/file-b/thumbnail?v=1")
+        XCTAssertEqual(sut.item(id: "a")?.isDriveOnly, false)
+        XCTAssertEqual(sut.libraryTotal, 2)
+        XCTAssertNil(sut.error)
+    }
+
+    /// Trashing only stamps the record, so the Drive file behind a trashed photo is still live —
+    /// and this app keeps a preview JPEG per photo in Drive. Neither is a photo to show.
+    func testTrashedPhotosAndPreviewRenditionsStayOut() async {
+        let preview = MediaRendition.renditionFileName(forOriginal: "file-a", rendition: .preview)
+        serve(records: [Fixture.photoJSON(id: "a", fileID: "file-a")],
+              trash: [Fixture.photoJSON(id: "t", fileID: "file-t")],
+              drive: [Fixture.driveFileJSON(id: "file-a"),
+                      Fixture.driveFileJSON(id: "file-t"),
+                      Fixture.driveFileJSON(id: "file-p", name: preview)])
+
+        await sut.loadEverything()
+
+        XCTAssertEqual(sut.allItems.map(\.id), ["a"])
+    }
+
+    /// A Drive listing that fails costs the Drive-only images, not the library.
+    func testAFailedDriveListingLeavesTheRecordsInPlace() async {
+        serve(records: [Fixture.photoJSON(id: "a", fileID: "file-a")], drive: nil)
+
+        await sut.loadEverything()
+
+        XCTAssertEqual(sut.allItems.map(\.id), ["a"])
+        XCTAssertNil(sut.error)
+    }
+
+    /// Favourite and archive live on the photo record, so the first change registers the image —
+    /// once, however many changes follow before the registration has answered.
+    func testChangingADriveOnlyImageRegistersItOnce() async {
+        serve(records: [], drive: [Fixture.driveFileJSON(id: "file-b")])
+        await sut.loadEverything()
+
+        sut.setStarred(id: "drive:file-b", isStarred: true)
+        sut.setArchived(id: "drive:file-b", isArchived: true)
+        await settle()
+
+        let registrations = MockURLProtocol.requests.filter {
+            $0.httpMethod == "POST" && $0.url?.path == "/api/v1/photos"
+        }
+        XCTAssertEqual(registrations.count, 1, "a second record for one file shows the photo twice")
+        let patched = MockURLProtocol.requests.filter { $0.httpMethod == "PATCH" }.map(\.url?.path)
+        XCTAssertEqual(patched, ["/api/v1/photos/rec-file-b", "/api/v1/photos/rec-file-b"])
+
+        XCTAssertEqual(sut.allItems.map(\.id), ["rec-file-b"])
+        XCTAssertEqual(sut.item(id: "drive:file-b")?.id, "rec-file-b",
+                       "a viewer still holding the Drive-only id should find the record")
+        XCTAssertNil(sut.error)
+    }
+
+    func testTrashingADriveOnlyImageRegistersItFirst() async {
+        serve(records: [], drive: [Fixture.driveFileJSON(id: "file-b")])
+        await sut.loadEverything()
+
+        sut.trash(id: "drive:file-b")
+        await settle()
+
+        XCTAssertTrue(sut.allItems.isEmpty)
+        XCTAssertEqual(sut.trashItems.map(\.id), ["rec-file-b"])
+        XCTAssertNotNil(sut.trashItems.first?.deletedAt)
+        XCTAssertNotNil(MockURLProtocol.request {
+            $0.httpMethod == "DELETE" && $0.url?.path == "/api/v1/photos/rec-file-b"
+        })
+        XCTAssertNil(sut.error)
+    }
+
+    /// A change made while the Drive listing is still arriving must survive its landing.
+    func testATrashDuringTheDriveListingIsNotUndone() async {
+        serve(records: [Fixture.photoJSON(id: "a", fileID: "file-a")],
+              drive: [Fixture.driveFileJSON(id: "file-a")], driveDelay: 0.3)
+        await sut.load()
+        await settle() // the records are in; the Drive listing is still on its way
+
+        sut.trash(id: "a")
+        XCTAssertTrue(sut.isFillingIn, "the trash has to land while the Drive listing is pending")
+        for _ in 0..<40 where sut.isFillingIn {
+            try? await Task.sleep(nanoseconds: 50_000_000)
+        }
+
+        XCTAssertFalse(sut.isFillingIn)
+        XCTAssertTrue(sut.allItems.isEmpty, "the listing landing must not put a trashed photo back")
+    }
+
     // MARK: - Helpers
+
+    /// Answers each endpoint a load and a mutation reach, by path: the photo listing, the trash,
+    /// Drive's image listing (`nil` fails it), and the writes, where a registration of `file-x`
+    /// comes back as record `rec-file-x`.
+    private func serve(records: [String], trash: [String] = [], drive: [String]?,
+                       driveDelay: TimeInterval = 0) {
+        let listing = MockURLProtocol.handlerForPagedListing(records)
+        MockURLProtocol.handler = { request in
+            let path = request.url?.path ?? ""
+            let ok = { (data: Data, status: Int) in
+                (HTTPURLResponse(url: request.url!, statusCode: status,
+                                 httpVersion: nil, headerFields: nil)!, data)
+            }
+            switch (request.httpMethod ?? "GET", path) {
+            case ("GET", "/api/v1/photos"):
+                return try listing(request)
+            case ("GET", "/api/v1/photos/trash"):
+                return ok(Fixture.listingJSON(trash), 200)
+            case ("GET", "/api/v1/drive/files"):
+                if driveDelay > 0 { Thread.sleep(forTimeInterval: driveDelay) }
+                guard let drive else { return ok(Data("{}".utf8), 500) }
+                return ok(Fixture.driveListingJSON(drive), 200)
+            case ("POST", "/api/v1/photos"):
+                let body = request.httpBody ?? Self.drain(request.httpBodyStream)
+                let json = (try? JSONSerialization.jsonObject(with: body)) as? [String: Any]
+                let fileID = json?["fileId"] as? String ?? "?"
+                return ok(Data(Fixture.photoJSON(id: "rec-\(fileID)", fileID: fileID).utf8), 201)
+            case ("PATCH", _):
+                let id = request.url?.lastPathComponent ?? "?"
+                let fileID = String(id.dropFirst("rec-".count))
+                return ok(Data(Fixture.photoJSON(id: id, fileID: fileID).utf8), 200)
+            default:
+                return ok(Data(), 204)
+            }
+        }
+    }
+
+    private static func drain(_ stream: InputStream?) -> Data {
+        guard let stream else { return Data() }
+        stream.open()
+        defer { stream.close() }
+        var data = Data()
+        var buffer = [UInt8](repeating: 0, count: 4096)
+        while stream.hasBytesAvailable {
+            let read = stream.read(&buffer, maxLength: buffer.count)
+            guard read > 0 else { break }
+            data.append(buffer, count: read)
+        }
+        return data
+    }
 
     /// Lets the detached `Task` inside an optimistic mutation finish.
     private func settle() async {

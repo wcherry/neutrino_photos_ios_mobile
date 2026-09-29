@@ -163,11 +163,15 @@ final class MockURLProtocol: URLProtocol {
         return requests.first(where: predicate)
     }
 
-    /// The body of the first request whose path contains `fragment`.
-    static func body(forPathContaining fragment: String) -> Data? {
+    /// The body of the first request whose path contains `fragment` — and, if `method` is given,
+    /// that was sent with it, so a read made by a background refresh cannot stand in for a write.
+    static func body(forPathContaining fragment: String, method: String? = nil) -> Data? {
         lock.lock()
         defer { lock.unlock() }
-        guard let index = requests.firstIndex(where: { ($0.url?.path ?? "").contains(fragment) }),
+        guard let index = requests.firstIndex(where: {
+                  ($0.url?.path ?? "").contains(fragment)
+                      && (method == nil || $0.httpMethod == method)
+              }),
               index < bodies.count else { return nil }
         return bodies[index]
     }
@@ -176,6 +180,14 @@ final class MockURLProtocol: URLProtocol {
         lock.lock()
         defer { lock.unlock() }
         return requests.count
+    }
+
+    /// How many requests read the photo listing itself (`GET /api/v1/photos`) — what a test about
+    /// paging or coalescing is counting, without the Drive and trash reads a load also makes.
+    static var listingRequestCount: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return requests.filter { $0.httpMethod == "GET" && $0.url?.path == "/api/v1/photos" }.count
     }
 
     /// The most recent request — what a single-call test asserts the path and method of.
