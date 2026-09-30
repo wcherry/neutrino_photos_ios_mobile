@@ -341,7 +341,7 @@ final class MediaContentService: ObservableObject {
             return url
         }
 
-        let dek = try unsealDEK(sealedDEK.sealed, keyVersion: sealedDEK.keyVersion)
+        let dek = try unsealDEK(sealedDEK.sealed, keyVersion: sealedDEK.keyVersion, fileID: item.fileID)
         let chunkSize = try await chunkSize(forFileID: item.fileID, dek: dek)
         try await api.download(path: "/api/v1/drive/files/\(item.fileID)", to: ciphertextURL)
 
@@ -385,7 +385,7 @@ final class MediaContentService: ObservableObject {
             logger.debug("\(fileID, privacy: .public) has no key ref, using bytes as they are")
             return ciphertext
         }
-        let dek = try unsealDEK(sealedDEK.sealed, keyVersion: sealedDEK.keyVersion)
+        let dek = try unsealDEK(sealedDEK.sealed, keyVersion: sealedDEK.keyVersion, fileID: fileID)
         // One push covering the whole file — what this app writes below `chunkingThreshold` and
         // what the web client writes always.
         return try await Self.offMain { Data(try MediaCrypto.decrypt(ciphertext, dek: dek)) }
@@ -678,31 +678,38 @@ final class MediaContentService: ObservableObject {
     /// A version this device lacks is reported as `missingKeyVersion` rather than as a decrypt
     /// failure. The distinction is the whole point of the versioning: the ciphertext is fine, the
     /// DEK is fine, and what is missing is one key that can still be brought across.
-    func unsealDEK(_ sealedBase64: String, keyVersion: Int = 1) throws -> Bytes {
-        let publicKey: Bytes
-        let secretKey: Bytes
-        switch KeyImportService.keyPair(forVersion: keyVersion) {
-        case .found(let publicKeyBase64, let privateKeyBase64):
-            guard let decodedPublic = KeyVaultCrypto.decodeBase64URL(publicKeyBase64),
-                  let decodedSecret = KeyVaultCrypto.decodeBase64URL(privateKeyBase64) else {
-                logger.error("unsealDEK: the stored key is not valid Base64URL")
-                throw MediaContentError.noEncryptionKey
-            }
-            publicKey = decodedPublic
-            secretKey = decodedSecret
-        case .noKey:
+    ///
+    /// The ref's version is tried first and every other key this device holds after it, because
+    /// this app used to file its key under the vault's envelope version: on a rotated account its
+    /// uploads were sealed to the active key and recorded as v1. When one opens under a different
+    /// version and `fileID` is given, the ref is re-filed under the right one in the background.
+    func unsealDEK(_ sealedBase64: String, keyVersion: Int = 1, fileID: String? = nil) throws -> Bytes {
+        let opened: OpenedDEK
+        do {
+            opened = try KeyImportService.openSealedDEK(sealedBase64, keyVersion: keyVersion)
+        } catch SealedDEKError.noKey {
             logger.error("unsealDEK: this device holds no encryption key")
             throw MediaContentError.noEncryptionKey
-        case .missingVersion(let version):
+        } catch SealedDEKError.missingVersion(let version) {
             logger.error("unsealDEK: no key for version \(version, privacy: .public)")
             throw MediaContentError.missingKeyVersion(version)
-        }
-
-        do {
-            return try MediaCrypto.openDEK(sealedBase64, publicKey: publicKey, secretKey: secretKey)
         } catch {
-            logger.error("unsealDEK: the seal was not made to key version \(keyVersion, privacy: .public)")
-            throw error
+            logger.error("unsealDEK: no key this device holds opens the seal (ref names v\(keyVersion, privacy: .public))")
+            throw MediaContentError.decryptionFailed
+        }
+        if opened.isMisfiled, let fileID {
+            refileKey(fileID: fileID, sealed: sealedBase64, version: opened.version)
+        }
+        return opened.dek
+    }
+
+    /// Re-files a key ref under the version that actually opens it — same sealed bytes, new number.
+    /// Best effort: the DEK is already in hand, and a failure here is retried by the next open.
+    private func refileKey(fileID: String, sealed: String, version: Int) {
+        logger.info("refiling \(fileID, privacy: .public)'s key under v\(version, privacy: .public)")
+        Task { [api] in
+            _ = try? await api.send(method: "PUT", path: "/api/v1/drive/files/\(fileID)/key",
+                                    json: APIStoreKeyRequest(encryptedFileKey: sealed, keyVersion: version))
         }
     }
 
