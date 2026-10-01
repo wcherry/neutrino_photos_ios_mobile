@@ -644,6 +644,14 @@ final class LibraryImportService: ObservableObject {
             // next thing tried rather than a failure they have to go and retry by hand.
             logger.debug("import cancelled during \(queued.localIdentifier, privacy: .public)")
             return true
+        } catch MediaContentError.staleEncryptionKey {
+            // Not this photo's failure, and every photo after it would fail the same way: this
+            // device's key is not the account's. Left pending and the run stopped, so the import
+            // resumes where it was once the key is fixed instead of leaving the whole library in
+            // "failed".
+            logger.error("import stopped: this device's key is not the account's")
+            pause(reason: MediaContentError.staleEncryptionKey.errorDescription)
+            return true
         } catch {
             logger.error("import failed for \(queued.localIdentifier, privacy: .public): \(error, privacy: .public)")
             return await finish(queued, state: .failed, error: error.localizedDescription)

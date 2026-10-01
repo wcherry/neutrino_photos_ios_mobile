@@ -1,4 +1,6 @@
 import Foundation
+import NeutrinoCrypto
+@testable import NeutrinoPhotos
 
 /// A `URLProtocol` stub that lets tests intercept `URLSession` traffic without touching the
 /// network, so services that make real HTTP calls can be exercised end to end — including
@@ -34,9 +36,19 @@ final class MockURLProtocol: URLProtocol {
         return URLSession(configuration: config)
     }
 
+    /// When true (the default), `GET /auth/users/test-user-id/public-key` — the signed-in test
+    /// user's own key — is answered with the public key stored in the Keychain as the account's
+    /// active v1, and is neither recorded nor passed to `handler`.
+    ///
+    /// Every upload now asks the key directory before it seals anything (`DeviceKeyGuard`).
+    /// Without this every upload test would have to script that request, and every test counting
+    /// `requests` would be off by one. Tests of the check itself turn it off and answer it.
+    static var answersPublishedKeyWithStoredKey = true
+
     static func reset() {
         lock.lock()
         defer { lock.unlock() }
+        answersPublishedKeyWithStoredKey = true
         handler = nil
         requests = []
         bodies = []
@@ -203,6 +215,7 @@ final class MockURLProtocol: URLProtocol {
     override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
 
     override func startLoading() {
+        if answerPublishedKeyLookup() { return }
         Self.lock.lock()
         Self.requests.append(request)
         if let stream = request.httpBodyStream {
@@ -230,6 +243,20 @@ final class MockURLProtocol: URLProtocol {
     }
 
     override func stopLoading() {}
+
+    private func answerPublishedKeyLookup() -> Bool {
+        guard Self.answersPublishedKeyWithStoredKey,
+              request.url?.path.hasSuffix("/users/\(TestTokens.userId)/public-key") == true,
+              let stored = KeyImportService.storedKeys() else { return false }
+        let body = try! JSONSerialization.data(withJSONObject: ["userId": TestTokens.userId,
+                                                                "publicKey": stored.publicKey,
+                                                                "version": 1])
+        let response = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!
+        client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+        client?.urlProtocol(self, didLoad: body)
+        client?.urlProtocolDidFinishLoading(self)
+        return true
+    }
 
     private static func drain(_ stream: InputStream) -> Data {
         stream.open()

@@ -15,6 +15,7 @@ struct EncryptionSettingsView: View {
 
     @EnvironmentObject private var vault: KeyVaultService
     @EnvironmentObject private var keyProvisioning: KeyProvisioningService
+    @EnvironmentObject private var keyGuard: DeviceKeyGuard
 
     @State private var showsUnlock = false
     @State private var showsLockConfirmation = false
@@ -42,7 +43,10 @@ struct EncryptionSettingsView: View {
                 canProvisionKey = await keyProvisioning.canProvision()
             }
         }
-        .refreshable { await vault.refresh() }
+        .refreshable {
+            await vault.refresh()
+            await keyGuard.checkAndRepair()
+        }
         .fullScreenCover(isPresented: $showsEncryptionSetup) {
             EncryptionSetupView(service: keyProvisioning) {
                 showsEncryptionSetup = false
@@ -91,11 +95,16 @@ struct EncryptionSettingsView: View {
                     .foregroundStyle(.orange)
             }
 
+            deviceKeyRow
+
             switch vault.status {
             case .unlocked:
                 Button("Remove key from this device", role: .destructive) {
                     showsLockConfirmation = true
                 }
+                // While photos exist that only this device's key opens, removing it destroys them.
+                // Wait for the repair to move them onto the account's key first.
+                .disabled(keyGuard.state.keyMustBeKept)
             case .locked, .noVault, .unreachable, .unknown:
                 Button("Unlock") { showsUnlock = true }
             }
@@ -103,6 +112,38 @@ struct EncryptionSettingsView: View {
             Text("This device")
         } footer: {
             Text(statusFooter)
+        }
+    }
+
+    /// Whether this device's key is still the account's, and the repair when it is not — see
+    /// `DeviceKeyGuard`.
+    @ViewBuilder
+    private var deviceKeyRow: some View {
+        switch keyGuard.state {
+        case .unknown, .current:
+            EmptyView()
+        case .stale:
+            Label("This device's key is out of date. Uploads are paused while photos it sealed are repaired.",
+                  systemImage: "exclamationmark.triangle")
+                .font(.footnote)
+                .foregroundStyle(.orange)
+        case .running(let examined, let rewrapped):
+            Label("Repairing photos sealed to this device's old key… \(rewrapped) repaired, \(examined) checked",
+                  systemImage: "arrow.triangle.2.circlepath")
+                .font(.footnote)
+        case .repaired(let report):
+            Label("Repaired: \(report.summary). Now remove this key and scan your current key code from the web to resume uploads.",
+                  systemImage: "checkmark.circle")
+                .font(.footnote)
+                .foregroundStyle(report.failed > 0 ? .orange : .green)
+            if report.failed > 0 {
+                Button("Retry Repair") { Task { await keyGuard.checkAndRepair() } }
+            }
+        case .failed(let message):
+            Label(message, systemImage: "exclamationmark.triangle")
+                .font(.footnote)
+                .foregroundStyle(.orange)
+            Button("Retry Repair") { Task { await keyGuard.checkAndRepair() } }
         }
     }
 
