@@ -15,7 +15,7 @@ struct EncryptionSettingsView: View {
 
     @EnvironmentObject private var vault: KeyVaultService
     @EnvironmentObject private var keyProvisioning: KeyProvisioningService
-    @EnvironmentObject private var keyGuard: DeviceKeyGuard
+    @EnvironmentObject private var keyRepair: DeviceKeyRepairService
 
     @State private var showsUnlock = false
     @State private var showsLockConfirmation = false
@@ -45,7 +45,7 @@ struct EncryptionSettingsView: View {
         }
         .refreshable {
             await vault.refresh()
-            await keyGuard.checkAndRepair()
+            await keyRepair.checkAndRepair()
         }
         .fullScreenCover(isPresented: $showsEncryptionSetup) {
             EncryptionSetupView(service: keyProvisioning) {
@@ -104,7 +104,7 @@ struct EncryptionSettingsView: View {
                 }
                 // While photos exist that only this device's key opens, removing it destroys them.
                 // Wait for the repair to move them onto the account's key first.
-                .disabled(keyGuard.state.keyMustBeKept)
+                .disabled(keyRepair.state.keyMustBeKept)
             case .locked, .noVault, .unreachable, .unknown:
                 Button("Unlock") { showsUnlock = true }
             }
@@ -116,10 +116,10 @@ struct EncryptionSettingsView: View {
     }
 
     /// Whether this device's key is still the account's, and the repair when it is not — see
-    /// `DeviceKeyGuard`.
+    /// `DeviceKeyRepairService` in NeutrinoCrypto.
     @ViewBuilder
     private var deviceKeyRow: some View {
-        switch keyGuard.state {
+        switch keyRepair.state {
         case .unknown, .current:
             EmptyView()
         case .stale:
@@ -137,13 +137,13 @@ struct EncryptionSettingsView: View {
                 .font(.footnote)
                 .foregroundStyle(report.failed > 0 ? .orange : .green)
             if report.failed > 0 {
-                Button("Retry Repair") { Task { await keyGuard.checkAndRepair() } }
+                Button("Retry Repair") { Task { await keyRepair.checkAndRepair() } }
             }
         case .failed(let message):
             Label(message, systemImage: "exclamationmark.triangle")
                 .font(.footnote)
                 .foregroundStyle(.orange)
-            Button("Retry Repair") { Task { await keyGuard.checkAndRepair() } }
+            Button("Retry Repair") { Task { await keyRepair.checkAndRepair() } }
         }
     }
 

@@ -22,74 +22,13 @@ private func uploadResponseJSON(id: String) -> Data {
     Data(#"{"id":"\#(id)","name":"a.jpg","sizeBytes":1,"mimeType":"image/jpeg","updatedAt":"2026-01-01T00:00:00"}"#.utf8)
 }
 
-// MARK: - DeviceKeyStatusTests
+// MARK: - DeviceKeyTransportTests
 
-final class DeviceKeyStatusTests: XCTestCase {
-
-    func testCurrentWhenTheStoredKeyIsThePublishedOne() {
-        let key = makeKeyPair().publicKey
-        XCTAssertEqual(DeviceKeyStatus.of(storedPublicKey: key,
-                                          published: PublishedKey(publicKey: key, version: 2)),
-                       .current(version: 2))
-    }
-
-    func testCurrentWhenOnlyThePaddingDiffers() {
-        let key = makeKeyPair().publicKey
-        XCTAssertEqual(DeviceKeyStatus.of(storedPublicKey: key + "=",
-                                          published: PublishedKey(publicKey: key, version: 1)),
-                       .current(version: 1))
-    }
-
-    func testStaleWhenTheAccountPublishesAnotherKey() {
-        let published = PublishedKey(publicKey: makeKeyPair().publicKey, version: 1)
-        XCTAssertEqual(DeviceKeyStatus.of(storedPublicKey: makeKeyPair().publicKey, published: published),
-                       .stale(published: published))
-    }
-
-    func testUnpublishedWhenTheAccountPublishesNothing() {
-        XCTAssertEqual(DeviceKeyStatus.of(storedPublicKey: makeKeyPair().publicKey, published: nil),
-                       .unpublished)
-    }
-}
-
-// MARK: - DeviceKeyRewrapTests
-
-final class DeviceKeyRewrapTests: XCTestCase {
-
-    /// The incident: a device sealed to its own stale key. After the rewrap the ref must open with
-    /// the account's key — the one the web holds — and carry the same DEK.
-    func testMovesADEKSealedToTheDeviceKeyOntoTheAccountsKey() throws {
-        let device = makeKeyPair(), account = makeKeyPair()
-        let dek = MediaCrypto.newDEK()
-        let sealed = try MediaCrypto.seal(dek: dek, toPublicKey: KeyVaultCrypto.decodeBase64URL(device.publicKey)!)
-
-        let rewrapped = try XCTUnwrap(DeviceKeyRewrap.rewrap(
-            SealedFileKey(sealed: sealed, keyVersion: 1),
-            deviceKey: KeyBundle(publicKey: device.publicKey, privateKey: device.privateKey, keyVersion: "1"),
-            to: PublishedKey(publicKey: account.publicKey, version: 4)))
-
-        XCTAssertEqual(rewrapped.keyVersion, 4)
-        XCTAssertEqual(try MediaCrypto.openDEK(rewrapped.sealed,
-                                               publicKey: KeyVaultCrypto.decodeBase64URL(account.publicKey)!,
-                                               secretKey: KeyVaultCrypto.decodeBase64URL(account.privateKey)!),
-                       dek, "Same DEK, new recipient — the ciphertext is untouched")
-    }
-
-    func testLeavesARefTheDeviceKeyDoesNotOpenAlone() throws {
-        let device = makeKeyPair(), account = makeKeyPair()
-        let sealed = try MediaCrypto.seal(dek: MediaCrypto.newDEK(),
-                                          toPublicKey: KeyVaultCrypto.decodeBase64URL(account.publicKey)!)
-        XCTAssertNil(DeviceKeyRewrap.rewrap(
-            SealedFileKey(sealed: sealed, keyVersion: 1),
-            deviceKey: KeyBundle(publicKey: device.publicKey, privateKey: device.privateKey, keyVersion: "1"),
-            to: PublishedKey(publicKey: account.publicKey, version: 1)))
-    }
-}
-
-// MARK: - DeviceKeyGuardTests
-
+/// This app's half of the shared device-key guard (`DeviceKeyCheck`, `DeviceKeyRepairService` in
+/// NeutrinoCrypto, which carry the comparison and rewrap tests): that uploads consult it, and that
+/// `APIClient` speaks the four requests the repair makes the way the server answers them.
 @MainActor
-final class DeviceKeyGuardTests: XCTestCase {
+final class DeviceKeyTransportTests: XCTestCase {
 
     private var api: APIClient!
 
@@ -98,10 +37,12 @@ final class DeviceKeyGuardTests: XCTestCase {
         MockURLProtocol.reset()
         TestServer.use()
         TestTokens.install()
+        DeviceKeyCheck.forget()
         api = APIClient(session: MockURLProtocol.makeSession())
     }
 
     override func tearDown() {
+        DeviceKeyCheck.forget()
         MockURLProtocol.reset()
         TestTokens.remove()
         TestKeys.remove()
@@ -194,7 +135,7 @@ final class DeviceKeyGuardTests: XCTestCase {
             return ok(404, Data())
         }
 
-        let sut = DeviceKeyGuard(api: api)
+        let sut = DeviceKeyRepairService(transport: api, sleep: { _ in })
         await sut.checkAndRepair()
 
         guard case .repaired(let report) = sut.state else { return XCTFail("state is \(sut.state)") }
@@ -220,7 +161,7 @@ final class DeviceKeyGuardTests: XCTestCase {
             XCTFail("a current key needs no other request: \(request.url?.path ?? "")")
             return (HTTPURLResponse(url: request.url!, statusCode: 404, httpVersion: nil, headerFields: nil)!, Data())
         }
-        let sut = DeviceKeyGuard(api: api)
+        let sut = DeviceKeyRepairService(transport: api, sleep: { _ in })
         await sut.checkAndRepair()
         XCTAssertEqual(sut.state, .current)
     }
