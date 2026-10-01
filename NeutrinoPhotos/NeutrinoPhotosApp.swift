@@ -67,7 +67,7 @@ struct NeutrinoPhotosApp: App {
         let thumbnails = ThumbnailCache(fetcher: api)
         let library = PhotoLibraryService(api: api, store: store)
         let content = MediaContentService(api: api, store: store, drive: drive,
-                                          thumbnails: thumbnails)
+                                          thumbnails: thumbnails, keyGuard: DeviceKeyGuard(api: api))
         let settings = AppSettings()
         let monitor = NetworkMonitor()
         let vault = KeyVaultService(api: api)
@@ -124,6 +124,7 @@ struct NeutrinoPhotosApp: App {
                 .environmentObject(library)
                 .environmentObject(albums)
                 .environmentObject(content)
+                .environmentObject(content.keyGuard)
                 .environmentObject(importer)
                 .environmentObject(libraryImporter)
                 .environmentObject(ledger)
@@ -148,6 +149,9 @@ struct NeutrinoPhotosApp: App {
                     // looks at another app. Carrying on here is what keeps that from ending the
                     // upload for good, silently; a run the user paused themselves is left alone.
                     libraryImporter.resumeIfBackgrounded()
+                    if authService.isAuthenticated {
+                        Task { await content.keyGuard.checkAndRepair() }
+                    }
                 }
                 .onOpenURL { url in
                     // A `.json` key file AirDropped or tapped in Files. Declaring the document type
@@ -190,6 +194,11 @@ struct NeutrinoPhotosApp: App {
         // And no idea whether this device still holds the account's key. Asking is one GET, and
         // it is the only thing that notices a key left behind by a different account.
         await vault.refresh()
+        // Whether the key this device holds is still the account's. A key replaced from another
+        // device leaves this one holding the old key, and only this device can move what it
+        // sealed to that key onto the account's — and only until the old key is replaced — so the
+        // repair starts by itself rather than waiting to be found in Settings.
+        await content.keyGuard.checkAndRepair()
         // Which photographs already have a preview rendition in the cloud. One listing, and the
         // answer is what keeps the viewer from downloading originals it does not need. A device
         // that never runs this simply generates previews locally instead.

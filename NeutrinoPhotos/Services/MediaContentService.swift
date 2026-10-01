@@ -13,6 +13,9 @@ enum MediaContentError: LocalizedError {
     /// separately from `noEncryptionKey` because it sends the user somewhere else: not "import your
     /// key" but "this account rotated and this device is missing a version".
     case missingKeyVersion(Int)
+    /// The key on this device is not the one the account publishes. Sealing to it would make a
+    /// photo that opens here and on no other device — see `DeviceKeyGuard`.
+    case staleEncryptionKey
     case encryptionFailed
     case decryptionFailed
     case notAuthenticated
@@ -25,6 +28,8 @@ enum MediaContentError: LocalizedError {
             return "No encryption key found. Import your key to open originals."
         case .missingKeyVersion(let version):
             return "This photo needs encryption key version \(version), which this device does not have. Scanning the key code again will not help \u{2014} it carries one key. On the computer that holds your key, open Settings \u{203A} Encryption and back up your older keys, then reopen this app."
+        case .staleEncryptionKey:
+            return "This device's encryption key is no longer your account's key, so uploads are paused. Open Settings \u{203A} Encryption to repair this device."
         case .encryptionFailed:
             return "Failed to encrypt the photo."
         case .decryptionFailed:
@@ -133,6 +138,8 @@ final class MediaContentService: ObservableObject {
     // MARK: - Dependencies
 
     private let api: APIClient
+    /// Checks this device's key is the account's before a photo is sealed to it.
+    let keyGuard: DeviceKeyGuard
 
     /// Where the rendition index lives between launches. Optional throughout: a device whose
     /// database would not open still browses, uploads, and opens photographs — it just re-derives
@@ -185,8 +192,10 @@ final class MediaContentService: ObservableObject {
          originals: DiskCache = .originals(),
          thumbnails: ThumbnailCache = ThumbnailCache(),
          streamingThreshold: Int64 = MediaContentService.streamingThreshold,
-         chunkingThreshold: Int64 = MediaContentService.chunkingThreshold) {
+         chunkingThreshold: Int64 = MediaContentService.chunkingThreshold,
+         keyGuard: DeviceKeyGuard? = nil) {
         self.api = api
+        self.keyGuard = keyGuard ?? DeviceKeyGuard(api: api)
         self.store = store
         self.drive = drive
         self.originals = originals
@@ -414,11 +423,14 @@ final class MediaContentService: ObservableObject {
     func upload(data: Data, fileName: String, mimeType: String, thumbnailBase64: String?,
                 folderID: String? = nil,
                 onProgress: (@MainActor (Double) -> Void)? = nil) async throws -> String {
+        // Before any work: a device whose key is not the account's fails each photo in one request
+        // rather than after encrypting it.
+        let keyVersion = try await keyGuard.sealingVersion()
         let dek = MediaCrypto.newDEK()
         let ciphertext = try await Self.offMain { try MediaCrypto.encrypt(Bytes(data), dek: dek) }
         let encryptedMetadata = try MediaCrypto.encryptMetadata(name: fileName, mimeType: mimeType,
                                                                 dek: dek)
-        let sealedFileKey = try sealDEK(dek)
+        let sealedFileKey = try sealDEK(dek, keyVersion: keyVersion)
 
         var form = MultipartFormBody()
         form.appendField(name: "encrypted_metadata", value: encryptedMetadata)
@@ -455,6 +467,7 @@ final class MediaContentService: ObservableObject {
     func upload(fileURL: URL, fileName: String, mimeType: String, thumbnailBase64: String?,
                 folderID: String? = nil,
                 onProgress: (@MainActor (Double) -> Void)? = nil) async throws -> String {
+        let keyVersion = try await keyGuard.sealingVersion()
         let size = (try? FileManager.default.attributesOfItem(atPath: fileURL.path)[.size] as? Int64)
             .flatMap { $0 } ?? 0
 
@@ -482,7 +495,7 @@ final class MediaContentService: ObservableObject {
 
         let encryptedMetadata = try MediaCrypto.encryptMetadata(name: fileName, mimeType: mimeType,
                                                                 chunkSize: chunkSize, dek: dek)
-        let sealedFileKey = try sealDEK(dek)
+        let sealedFileKey = try sealDEK(dek, keyVersion: keyVersion)
 
         var form = MultipartFormBody()
         form.appendField(name: "encrypted_metadata", value: encryptedMetadata)
@@ -656,18 +669,20 @@ final class MediaContentService: ObservableObject {
     // can be called off the main thread and asserted on its own. What stays here is the part that
     // needs the Keychain: which key pair a DEK is sealed to.
 
-    /// Seals `dek` to the account's **active** Curve25519 public key (`crypto_box_seal`), and
-    /// reports which version that was.
+    /// Seals `dek` to this device's stored Curve25519 public key (`crypto_box_seal`), filed under
+    /// `keyVersion`.
     ///
-    /// The version travels with the sealed key because the server records it on the key ref, and a
-    /// ref that names the wrong version is a photo nothing can open: the web client reaches for the
-    /// key the ref names, not the one it was actually sealed to.
-    func sealDEK(_ dek: Bytes) throws -> SealedFileKey {
+    /// The primitive only. An upload must pass the version `keyGuard.sealingVersion()` returned —
+    /// that call is what establishes the stored key is the account's, and its number is the
+    /// account's number for it. Sealing to the stored key without asking is how a device holding a
+    /// replaced key made photos that open nowhere else. `keyVersion` defaults to the Keychain's
+    /// number for the round-trip tests that exercise the crypto alone.
+    func sealDEK(_ dek: Bytes, keyVersion: Int? = nil) throws -> SealedFileKey {
         guard let publicKey = Self.storedKey(KeyImportService.publicKeyKeychainKey) else {
             throw MediaContentError.noEncryptionKey
         }
         return SealedFileKey(sealed: try MediaCrypto.seal(dek: dek, toPublicKey: publicKey),
-                             keyVersion: KeyImportService.activeKeyVersion())
+                             keyVersion: keyVersion ?? KeyImportService.activeKeyVersion())
     }
 
     /// Reverses ``sealDEK(_:)``, resolving `keyVersion` against the keys this device holds.
