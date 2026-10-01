@@ -29,6 +29,9 @@ struct NeutrinoPhotosApp: App {
     @StateObject private var libraryImporter: LibraryImportService
     @StateObject private var ledger: ImportLedger
     @StateObject private var vault: KeyVaultService
+    /// Re-seals what this device sealed to a key the account no longer publishes — see
+    /// `DeviceKeyRepairService` in NeutrinoCrypto.
+    @StateObject private var keyRepair: DeviceKeyRepairService
     @StateObject private var devices: DeviceSessionService
     @StateObject private var drive: PhotosDriveService
     @StateObject private var thumbnails: ThumbnailCache
@@ -67,7 +70,7 @@ struct NeutrinoPhotosApp: App {
         let thumbnails = ThumbnailCache(fetcher: api)
         let library = PhotoLibraryService(api: api, store: store)
         let content = MediaContentService(api: api, store: store, drive: drive,
-                                          thumbnails: thumbnails, keyGuard: DeviceKeyGuard(api: api))
+                                          thumbnails: thumbnails)
         let settings = AppSettings()
         let monitor = NetworkMonitor()
         let vault = KeyVaultService(api: api)
@@ -96,6 +99,7 @@ struct NeutrinoPhotosApp: App {
         _settings = StateObject(wrappedValue: settings)
         _networkMonitor = StateObject(wrappedValue: monitor)
         _vault = StateObject(wrappedValue: vault)
+        _keyRepair = StateObject(wrappedValue: DeviceKeyRepairService(transport: api))
         _devices = StateObject(wrappedValue: DeviceSessionService(api: api))
         _deviceLibrary = StateObject(wrappedValue: deviceLibrary)
         // Built here rather than inside the screen that draws it, so the listing and its thumbnails
@@ -124,7 +128,7 @@ struct NeutrinoPhotosApp: App {
                 .environmentObject(library)
                 .environmentObject(albums)
                 .environmentObject(content)
-                .environmentObject(content.keyGuard)
+                .environmentObject(keyRepair)
                 .environmentObject(importer)
                 .environmentObject(libraryImporter)
                 .environmentObject(ledger)
@@ -150,7 +154,7 @@ struct NeutrinoPhotosApp: App {
                     // upload for good, silently; a run the user paused themselves is left alone.
                     libraryImporter.resumeIfBackgrounded()
                     if authService.isAuthenticated {
-                        Task { await content.keyGuard.checkAndRepair() }
+                        Task { await keyRepair.checkAndRepair() }
                     }
                 }
                 .onOpenURL { url in
@@ -198,7 +202,7 @@ struct NeutrinoPhotosApp: App {
         // device leaves this one holding the old key, and only this device can move what it
         // sealed to that key onto the account's — and only until the old key is replaced — so the
         // repair starts by itself rather than waiting to be found in Settings.
-        await content.keyGuard.checkAndRepair()
+        await keyRepair.checkAndRepair()
         // Which photographs already have a preview rendition in the cloud. One listing, and the
         // answer is what keeps the viewer from downloading originals it does not need. A device
         // that never runs this simply generates previews locally instead.

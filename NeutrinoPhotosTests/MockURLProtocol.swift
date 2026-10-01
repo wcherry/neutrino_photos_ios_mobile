@@ -40,7 +40,7 @@ final class MockURLProtocol: URLProtocol {
     /// user's own key — is answered with the public key stored in the Keychain as the account's
     /// active v1, and is neither recorded nor passed to `handler`.
     ///
-    /// Every upload now asks the key directory before it seals anything (`DeviceKeyGuard`).
+    /// Every upload now asks the key directory before it seals anything (`DeviceKeyCheck`, NeutrinoCrypto).
     /// Without this every upload test would have to script that request, and every test counting
     /// `requests` would be off by one. Tests of the check itself turn it off and answer it.
     static var answersPublishedKeyWithStoredKey = true
