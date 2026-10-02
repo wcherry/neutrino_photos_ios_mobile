@@ -6,6 +6,11 @@ import NeutrinoCrypto
 // MARK: - SettingsView
 
 /// Preferences, the account, and the state of the encryption key.
+///
+/// Grouped the way Epic 12 lays it out — Backup, Privacy, Storage, Account — with the library's own
+/// display preferences first. Every switch here changes what the app does; a setting for a feature
+/// that does not exist yet (automatic backup's conditions, say) is left out rather than shown as a
+/// switch that does nothing.
 struct SettingsView: View {
 
     @EnvironmentObject private var authService: AuthService
@@ -29,10 +34,9 @@ struct SettingsView: View {
     var body: some View {
         List {
             librarySection
-            uploadsSection
+            backupSection
             deviceLibrarySection
             privacySection
-            encryptionSection
             storageSection
             accountSection
             aboutSection
@@ -76,18 +80,26 @@ struct SettingsView: View {
         }
     }
 
-    // MARK: - Uploads
+    // MARK: - Backup
 
-    private var uploadsSection: some View {
+    private var backupSection: some View {
         Section {
+            LabeledContent("Automatic backup", value: "Not available yet")
             Toggle("Upload over Wi-Fi only", isOn: $settings.wifiOnlyUploads)
             LabeledContent("Connection", value: connectionDescription)
+            LabeledContent("Uploads", value: "Full resolution")
             Button("Forget import history") { importer.forgetImportHistory() }
                 .disabled(ledger.count == 0)
         } header: {
-            Text("Uploads")
+            Text("Backup")
         } footer: {
             Text("""
+                 Photos and videos upload at the resolution the camera wrote them; HEIC photos are \
+                 stored as full-resolution JPEG so every device and browser can open them. With \
+                 Wi-Fi only on, an import waits rather than using cellular data. Backing up new \
+                 photos automatically — and its charging and video options — arrives with \
+                 automatic backup; until then, import from the Library tab.
+
                  This device remembers \(ledger.count) uploaded item(s) — by their identity in \
                  Apple Photos and by a hash of their bytes — so importing the same photos twice \
                  doesn't duplicate them. The record is local: the server stores only ciphertext and \
@@ -152,38 +164,28 @@ struct SettingsView: View {
     /// point of the section.
     private var privacySection: some View {
         Section {
-            Toggle("Include location in cloud metadata", isOn: $settings.publishesLocationMetadata)
-        } header: {
-            Text("Privacy")
-        } footer: {
-            Text("""
-                 Your photos are encrypted before they leave this device and stay unreadable to \
-                 Neutrino. Their index — size, camera, exposure, dates — is not encrypted, because \
-                 the server sorts and searches it. Coordinates are held back from that index unless \
-                 you turn this on. Either way this device keeps them, so the info panel shows a \
-                 location; turning it on is what will make Places and map search work, and what \
-                 puts a record of where you've been on the server.
-                 """)
-        }
-    }
-
-    // MARK: - Encryption
-
-    private var encryptionSection: some View {
-        Section {
             NavigationLink {
                 EncryptionSettingsView()
             } label: {
                 LabeledContent("Encryption", value: keyStateDescription)
             }
-            NavigationLink("Devices") { DevicesView() }
+            Toggle("Include location in cloud metadata", isOn: $settings.publishesLocationMetadata)
+            LabeledContent("Analytics", value: "None collected")
         } header: {
-            Text("Encryption")
+            Text("Privacy")
         } footer: {
             Text("""
-                 Photos are encrypted on this device before upload and the key never leaves it. \
-                 Browsing the timeline works without a key — grid previews are stored unencrypted \
-                 with each file — but opening an original needs one.
+                 Your photos are encrypted on this device before they upload, and the key never \
+                 leaves it, so Neutrino can't read them. Grid thumbnails are stored unencrypted \
+                 with each file so the timeline browses without a key; opening an original needs \
+                 one.
+
+                 The library's index — size, camera, exposure, dates, titles — is not encrypted, \
+                 because the server sorts and searches it. Coordinates are held back from that \
+                 index unless you turn location on; this device keeps them either way.
+
+                 This app sends no analytics or crash reports. Reporting a bug opens a GitHub form \
+                 you read and submit yourself.
                  """)
         }
     }
@@ -205,22 +207,17 @@ struct SettingsView: View {
             if let quota = drive.quota {
                 LabeledContent("In your account", value: quota.formattedUsage)
             }
-            LabeledContent("Photos and videos on this device", value: bytes(storage?.originals))
-            LabeledContent("Grid previews", value: bytes(storage?.thumbnails))
-            LabeledContent("Library index", value: bytes(storage?.database))
-            Button("Clear cache") {
-                content.clearCache()
-                Task { storage = await content.storageBreakdown() }
+            LabeledContent("On this device", value: bytes(storage?.total))
+            NavigationLink("Manage Storage") {
+                StorageView()
+                    .onDisappear { Task { storage = await content.storageBreakdown() } }
             }
-            .disabled((storage?.originals ?? 0) + (storage?.thumbnails ?? 0) == 0)
         } header: {
             Text("Storage")
         } footer: {
             Text("""
-                 Opening a photo or playing a video keeps its decrypted copy on this device so the \
-                 next look at it costs nothing. The cache is capped and the oldest items are \
-                 dropped first. Clearing it frees the space immediately — nothing is lost, since \
-                 every one of them is still in your account.
+                 What your library uses in your account and on this device, and ways to free \
+                 space here without removing anything from your account.
                  """)
         }
     }
@@ -250,6 +247,20 @@ struct SettingsView: View {
                     .foregroundStyle(.secondary)
                     .onSubmit { DeviceIdentity.setDeviceName(deviceName) }
             }
+            NavigationLink("Devices and sessions") { DevicesView() }
+            NavigationLink {
+                EncryptionSettingsView()
+            } label: {
+                LabeledContent("Encryption keys", value: keyStateDescription)
+            }
+            if let quota = drive.quota {
+                LabeledContent("Storage plan", value: Self.planDescription(quota))
+                if let cap = quota.dailyCapBytes {
+                    LabeledContent("Daily upload limit",
+                                   value: ByteCountFormatter.string(fromByteCount: cap,
+                                                                    countStyle: .file))
+                }
+            }
             LabeledContent("Server", value: AuthService.baseURL)
             Button("Sign out", role: .destructive) { showsSignOutConfirmation = true }
         } header: {
@@ -257,6 +268,12 @@ struct SettingsView: View {
         } footer: {
             Text("The device name identifies this session in your account's device list. It is sent when you sign in, so a change takes effect at the next sign-in.")
         }
+    }
+
+    /// "15 GB" or "Unlimited" — the server's quota is the plan; it has no plan names.
+    private static func planDescription(_ quota: DriveQuota) -> String {
+        guard let limit = quota.quotaBytes else { return "Unlimited" }
+        return ByteCountFormatter.string(fromByteCount: limit, countStyle: .file)
     }
 
     // MARK: - About
