@@ -75,15 +75,13 @@ struct AlbumDetailView: View {
                         .foregroundStyle(.secondary)
                 }
             }
-            if FeatureFlags.slideshow {
-                ToolbarItem(placement: .primaryAction) {
-                    Button {
-                        showsSlideshow = true
-                    } label: {
-                        Label("Play Slideshow", systemImage: "play.fill")
-                    }
-                    .disabled(slideshowItems.isEmpty)
+            ToolbarItem(placement: .primaryAction) {
+                Button {
+                    showsSlideshow = true
+                } label: {
+                    Label("Play Slideshow", systemImage: "play.fill")
                 }
+                .disabled(slideshowItems.isEmpty)
             }
         }
         .refreshable { await load() }
@@ -142,18 +140,16 @@ struct AlbumDetailView: View {
 
     @ViewBuilder
     private func contextMenu(for item: MediaItem) -> some View {
-        if FeatureFlags.favorites {
-            Button {
-                library.setStarred(id: item.id, isStarred: !item.isStarred)
-                // The album's own copy is what this grid draws, so it has to be updated too — the
-                // library's change does not reach an array this view owns.
-                if let index = items.firstIndex(where: { $0.id == item.id }) {
-                    items[index].isStarred.toggle()
-                }
-            } label: {
-                Label(item.isStarred ? "Remove from Favorites" : "Favorite",
-                      systemImage: item.isStarred ? "heart.slash" : "heart")
+        Button {
+            library.setStarred(id: item.id, isStarred: !item.isStarred)
+            // The album's own copy is what this grid draws, so it has to be updated too — the
+            // library's change does not reach an array this view owns.
+            if let index = items.firstIndex(where: { $0.id == item.id }) {
+                items[index].isStarred.toggle()
             }
+        } label: {
+            Label(item.isStarred ? "Remove from Favorites" : "Favorite",
+                  systemImage: item.isStarred ? "heart.slash" : "heart")
         }
         if album.isEditable {
             Button {
@@ -164,13 +160,11 @@ struct AlbumDetailView: View {
                 Label("Remove from Album", systemImage: "minus.circle")
             }
         }
-        if FeatureFlags.trash {
-            Button(role: .destructive) {
-                library.trash(id: item.id)
-                items.removeAll { $0.id == item.id }
-            } label: {
-                Label("Delete", systemImage: "trash")
-            }
+        Button(role: .destructive) {
+            library.trash(id: item.id)
+            items.removeAll { $0.id == item.id }
+        } label: {
+            Label("Delete", systemImage: "trash")
         }
     }
 

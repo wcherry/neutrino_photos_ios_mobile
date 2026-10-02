@@ -208,33 +208,27 @@ struct LibraryView: View {
 
     @ViewBuilder
     private func contextMenu(for item: MediaItem) -> some View {
-        if FeatureFlags.favorites {
-            Button {
-                library.setStarred(id: item.id, isStarred: !item.isStarred)
-            } label: {
-                Label(item.isStarred ? "Remove from Favorites" : "Favorite",
-                      systemImage: item.isStarred ? "heart.slash" : "heart")
-            }
+        Button {
+            library.setStarred(id: item.id, isStarred: !item.isStarred)
+        } label: {
+            Label(item.isStarred ? "Remove from Favorites" : "Favorite",
+                  systemImage: item.isStarred ? "heart.slash" : "heart")
         }
-        if FeatureFlags.archive {
-            Button {
-                library.setArchived(id: item.id, isArchived: !item.isArchived)
-            } label: {
-                Label(item.isArchived ? "Unarchive" : "Archive",
-                      systemImage: item.isArchived ? "tray.and.arrow.up" : "archivebox")
-            }
+        Button {
+            library.setArchived(id: item.id, isArchived: !item.isArchived)
+        } label: {
+            Label(item.isArchived ? "Unarchive" : "Archive",
+                  systemImage: item.isArchived ? "tray.and.arrow.up" : "archivebox")
         }
         Button {
             selection.begin(with: item.id)
         } label: {
             Label("Select", systemImage: "checkmark.circle")
         }
-        if FeatureFlags.trash {
-            Button(role: .destructive) {
-                library.trash(id: item.id)
-            } label: {
-                Label("Delete", systemImage: "trash")
-            }
+        Button(role: .destructive) {
+            library.trash(id: item.id)
+        } label: {
+            Label("Delete", systemImage: "trash")
         }
     }
 
@@ -263,9 +257,7 @@ struct LibraryView: View {
                             Text(grouping.displayName).tag(grouping)
                         }
                     }
-                    if FeatureFlags.archive {
-                        Toggle("Show Archived", isOn: $settings.showArchived)
-                    }
+                    Toggle("Show Archived", isOn: $settings.showArchived)
                     if !cache.items.isEmpty {
                         Divider()
                         Button {
@@ -284,7 +276,7 @@ struct LibraryView: View {
             if selection.isActive {
                 Button("Done") { selection.end() }
                     .fontWeight(.semibold)
-            } else if FeatureFlags.importFromPhotos {
+            } else {
                 importControl
             }
         }
@@ -305,30 +297,21 @@ struct LibraryView: View {
     /// pays on every import for a choice they do not have.
     @ViewBuilder
     private var importControl: some View {
-        if FeatureFlags.fullLibraryImport && FeatureFlags.deviceLibraryAccess {
-            Menu {
-                PhotosPicker(selection: $pickerSelection,
-                             matching: .any(of: [.images, .videos]),
-                             photoLibrary: .shared()) {
-                    Label("Select Photos…", systemImage: "photo.on.rectangle")
-                }
-                Button {
-                    showsLibraryImport = true
-                } label: {
-                    Label("Import Entire Library…", systemImage: "square.stack.3d.up")
-                }
-            } label: {
-                Label("Import", systemImage: "square.and.arrow.up")
-            }
-            .disabled(importer.isImporting)
-        } else {
+        Menu {
             PhotosPicker(selection: $pickerSelection,
                          matching: .any(of: [.images, .videos]),
                          photoLibrary: .shared()) {
-                Label("Import", systemImage: "square.and.arrow.up")
+                Label("Select Photos…", systemImage: "photo.on.rectangle")
             }
-            .disabled(importer.isImporting)
+            Button {
+                showsLibraryImport = true
+            } label: {
+                Label("Import Entire Library…", systemImage: "square.stack.3d.up")
+            }
+        } label: {
+            Label("Import", systemImage: "square.and.arrow.up")
         }
+        .disabled(importer.isImporting)
     }
 
     // MARK: - Selection bar
@@ -342,24 +325,16 @@ struct LibraryView: View {
     private var selectionBar: some View {
         if selection.isActive {
             HStack(spacing: 0) {
-                if FeatureFlags.favorites {
-                    action("Favorite", systemImage: allSelectedAreStarred ? "heart.fill" : "heart",
-                           perform: toggleStarOnSelection)
+                action("Favorite", systemImage: allSelectedAreStarred ? "heart.fill" : "heart",
+                       perform: toggleStarOnSelection)
+                action("Add To", systemImage: "rectangle.stack.badge.plus") {
+                    addingToAlbum = AlbumTarget(items: selectedItems)
                 }
-                if FeatureFlags.albums {
-                    action("Add To", systemImage: "rectangle.stack.badge.plus") {
-                        addingToAlbum = AlbumTarget(items: selectedItems)
-                    }
-                }
-                if FeatureFlags.archive {
-                    action("Archive",
-                           systemImage: allSelectedAreArchived ? "tray.and.arrow.up" : "archivebox",
-                           perform: toggleArchiveOnSelection)
-                }
-                if FeatureFlags.trash {
-                    action("Delete", systemImage: "trash", role: .destructive) {
-                        showsBulkDeleteConfirmation = true
-                    }
+                action("Archive",
+                       systemImage: allSelectedAreArchived ? "tray.and.arrow.up" : "archivebox",
+                       perform: toggleArchiveOnSelection)
+                action("Delete", systemImage: "trash", role: .destructive) {
+                    showsBulkDeleteConfirmation = true
                 }
             }
             .disabled(selection.isEmpty)
@@ -500,33 +475,31 @@ struct LibraryView: View {
     /// mid-import has no other way to find out that two thousand photographs are still waiting.
     @ViewBuilder
     private var libraryImportBanner: some View {
-        if FeatureFlags.fullLibraryImport {
-            switch libraryImporter.phase {
-            case .running, .waiting, .scanning:
-                Button {
-                    showsLibraryImport = true
-                } label: {
-                    libraryImportProgress
-                }
-                .buttonStyle(.plain)
-            case .interrupted:
-                Button {
-                    showsLibraryImport = true
-                } label: {
-                    banner("Import interrupted — \(libraryImporter.counts.pending) item(s) left. Tap to resume.",
-                           systemImage: "arrow.clockwise", tint: .accentColor)
-                }
-                .buttonStyle(.plain)
-            case .paused(let reason?):
-                Button {
-                    showsLibraryImport = true
-                } label: {
-                    banner(reason, systemImage: "exclamationmark.triangle", tint: .orange)
-                }
-                .buttonStyle(.plain)
-            case .idle, .finished, .paused:
-                EmptyView()
+        switch libraryImporter.phase {
+        case .running, .waiting, .scanning:
+            Button {
+                showsLibraryImport = true
+            } label: {
+                libraryImportProgress
             }
+            .buttonStyle(.plain)
+        case .interrupted:
+            Button {
+                showsLibraryImport = true
+            } label: {
+                banner("Import interrupted — \(libraryImporter.counts.pending) item(s) left. Tap to resume.",
+                       systemImage: "arrow.clockwise", tint: .accentColor)
+            }
+            .buttonStyle(.plain)
+        case .paused(let reason?):
+            Button {
+                showsLibraryImport = true
+            } label: {
+                banner(reason, systemImage: "exclamationmark.triangle", tint: .orange)
+            }
+            .buttonStyle(.plain)
+        case .idle, .finished, .paused:
+            EmptyView()
         }
     }
 
@@ -638,16 +611,14 @@ struct LibraryView: View {
                 .multilineTextAlignment(.center)
                 .padding(.horizontal, 32)
 
-            if FeatureFlags.importFromPhotos {
-                PhotosPicker(selection: $pickerSelection,
-                             matching: .any(of: [.images, .videos]),
-                             photoLibrary: .shared()) {
-                    Text("Import Photos")
-                        .font(.body.weight(.medium))
-                }
-                .buttonStyle(.borderedProminent)
-                .padding(.top, 8)
+            PhotosPicker(selection: $pickerSelection,
+                         matching: .any(of: [.images, .videos]),
+                         photoLibrary: .shared()) {
+                Text("Import Photos")
+                    .font(.body.weight(.medium))
             }
+            .buttonStyle(.borderedProminent)
+            .padding(.top, 8)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }

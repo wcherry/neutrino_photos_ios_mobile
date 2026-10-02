@@ -30,9 +30,7 @@ struct SettingsView: View {
         List {
             librarySection
             uploadsSection
-            if FeatureFlags.deviceLibraryAccess {
-                deviceLibrarySection
-            }
+            deviceLibrarySection
             privacySection
             encryptionSection
             storageSection
@@ -126,12 +124,10 @@ struct SettingsView: View {
             } label: {
                 LabeledContent("Photo library access", value: deviceLibrary.access.displayName)
             }
-            if FeatureFlags.fullLibraryImport {
-                NavigationLink {
-                    LibraryImportView()
-                } label: {
-                    LabeledContent("Import library", value: libraryImportSummary)
-                }
+            NavigationLink {
+                LibraryImportView()
+            } label: {
+                LabeledContent("Import library", value: libraryImportSummary)
             }
             Toggle("Keep Live Photo motion", isOn: $settings.importsLivePhotoMotion)
                 .disabled(!deviceLibrary.access.isUsable)
@@ -268,7 +264,6 @@ struct SettingsView: View {
     private var aboutSection: some View {
         Section("About") {
             LabeledContent("Version", value: Self.versionString)
-            NavigationLink("What's not here yet") { RoadmapView() }
         }
     }
 
@@ -277,48 +272,5 @@ struct SettingsView: View {
         let version = info?["CFBundleShortVersionString"] as? String ?? "—"
         let build = info?["CFBundleVersion"] as? String ?? "—"
         return "\(version) (\(build))"
-    }
-}
-
-// MARK: - RoadmapView
-
-/// The roadmap, read straight off `FeatureFlags`.
-///
-/// A settings screen that lists what an app *cannot* do is unusual, and deliberate here: this is an
-/// early build of a photo library, and somebody deciding whether to trust it with their pictures
-/// should be able to see the gap between it and the roadmap without reading the source.
-private struct RoadmapView: View {
-
-    private let planned: [(String, Bool)] = [
-        ("Local cache and library index", FeatureFlags.mediaPipeline),
-        ("Photo library integration", FeatureFlags.deviceLibraryAccess),
-        ("Full-library import", FeatureFlags.fullLibraryImport),
-        ("Albums, favorites and trash", FeatureFlags.organization),
-        ("Automatic backup", FeatureFlags.automaticBackup),
-        ("Offline browsing", FeatureFlags.offlineMode),
-        ("Search", FeatureFlags.search),
-        ("Places and map", FeatureFlags.places),
-        ("People and faces", FeatureFlags.people),
-        ("Memories", FeatureFlags.memories),
-        ("Editing", FeatureFlags.editing),
-        ("Sharing", FeatureFlags.sharing),
-    ]
-
-    var body: some View {
-        List {
-            Section {
-                ForEach(planned, id: \.0) { name, done in
-                    HStack {
-                        Image(systemName: done ? "checkmark.circle.fill" : "circle")
-                            .foregroundStyle(done ? .green : .secondary)
-                        Text(name)
-                    }
-                }
-            } footer: {
-                Text("See agent_docs/mvp.md for the full roadmap.")
-            }
-        }
-        .navigationTitle("Roadmap")
-        .navigationBarTitleDisplayMode(.inline)
     }
 }

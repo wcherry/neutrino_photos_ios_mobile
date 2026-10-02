@@ -8,21 +8,11 @@ mvp.md §19)**; everything after it is mapped at the end but not detailed.
 ## How to read this document
 
 **Epics are numbered once and never renumbered.** Epic 7 stays Epic 7 after it ships, so
-commit messages, feature flags, and code comments can point at it. Gaps in the numbering
-are fine.
+commit messages and code comments can point at it. Gaps in the numbering are fine.
 
-**Every user-visible epic lands behind a flag** in `NeutrinoPhotos/Config/FeatureFlags.swift`,
-matching the Notes app convention:
-
-```swift
-/// Set to true to enable the Epic 9 Organization feature (albums, favorites, and the
-/// Recently Deleted view). When false, the Albums tab shows its placeholder and no
-/// album/favorite actions appear.
-static let organization: Bool = false
-```
-
-The flag is flipped to `true` in the same PR that completes the epic's manual verification —
-not before. A half-built epic on `main` behind a `false` flag is expected and fine.
+**The app does not use feature flags.** An epic's code ships live when it merges. The
+`**Flag:**` lines under earlier epics, and the `FeatureFlags.swift` they name, are history: the
+module was removed and every flag that was `true` became unconditional code.
 
 **An epic is done when its manual verification passes on a physical device**, not just the
 simulator. Background upload, Photos-library scale, thermal/battery behaviour, and Keychain
@@ -1276,6 +1266,3 @@ larger one before a milestone closes.
 
 **Offline is the default assumption.** Every feature is asked "what does this do on a plane?"
 before it's called done.
-
-**Feature flags are removed once an epic ships and stabilizes** — typically one release later.
-A flag that outlives its epic by three releases is dead code with a switch on it.

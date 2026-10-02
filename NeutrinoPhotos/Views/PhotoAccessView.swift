@@ -171,27 +171,19 @@ struct PhotoAccessView: View {
     /// grants it should not be left wondering what it bought them.
     private var comingSection: some View {
         Section {
-            if FeatureFlags.fullLibraryImport {
-                NavigationLink {
-                    LibraryImportView()
-                } label: {
-                    HStack {
-                        Image(systemName: "checkmark.circle.fill")
-                            .foregroundStyle(.green)
-                        Text("Import the whole library at once")
-                    }
-                }
-                .disabled(!deviceLibrary.access.isUsable)
-            } else {
+            NavigationLink {
+                LibraryImportView()
+            } label: {
                 HStack {
-                    Image(systemName: "circle")
-                        .foregroundStyle(.secondary)
+                    Image(systemName: "checkmark.circle.fill")
+                        .foregroundStyle(.green)
                     Text("Import the whole library at once")
                 }
             }
+            .disabled(!deviceLibrary.access.isUsable)
             HStack {
-                Image(systemName: FeatureFlags.automaticBackup ? "checkmark.circle.fill" : "circle")
-                    .foregroundStyle(FeatureFlags.automaticBackup ? .green : .secondary)
+                Image(systemName: "circle")
+                    .foregroundStyle(.secondary)
                 Text("Automatic backup of new photos")
             }
         } header: {
