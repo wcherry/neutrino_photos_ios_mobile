@@ -16,10 +16,18 @@ struct ContentView: View {
     /// Held, like ``importer``, only to know whether this device is mid-import — see
     /// ``isImporting``.
     @EnvironmentObject private var libraryImporter: LibraryImportService
+    @EnvironmentObject private var photoLinks: PhotoLinkRouter
+    /// Held only to hand on to a viewer opened from a link.
+    @EnvironmentObject private var thumbnails: ThumbnailCache
+    @EnvironmentObject private var deviceLibrary: DevicePhotoLibrary
 
     @Environment(\.scenePhase) private var scenePhase
 
     @State private var selectedTab: Tab = .library
+    /// The photo a link opened, shown over whichever tab is up.
+    @State private var linkedItem: MediaItem?
+    /// Set when a link named a photo this account's library doesn't hold.
+    @State private var showsLinkUnavailable = false
 
     enum Tab: Hashable {
         case library, albums, search, settings
@@ -71,6 +79,42 @@ struct ContentView: View {
             guard tab == .library, !isImporting else { return }
             Task { await library.refreshIfStale() }
         }
+        // A link can arrive before the library has loaded — a cold launch from a tap in Messages —
+        // so it is tried when it lands and again whenever the library changes, until it resolves.
+        .onChange(of: photoLinks.pendingFileID) { _ in openPendingLink() }
+        .onChange(of: library.lastLoadedAt) { _ in openPendingLink() }
+        .onChange(of: library.isFillingIn) { _ in openPendingLink() }
+        .onAppear { openPendingLink() }
+        .fullScreenCover(item: $linkedItem) { item in
+            PhotoDetailView(items: [item], initialID: item.id)
+                .environmentObject(thumbnails)
+                .environmentObject(deviceLibrary)
+        }
+        .sheet(isPresented: $showsLinkUnavailable) {
+            PhotoLinkUnavailableView()
+        }
+    }
+
+    // MARK: - Photo links
+
+    /// Opens the photo a `/open/photo/<file id>` link named, once the library can say whether it
+    /// holds it.
+    ///
+    /// Resolved against the library this device already has rather than by fetching the file: a
+    /// photo is only openable here if it is in this account's library, and a link to anything else
+    /// — another account's photo, one since deleted — gets a plain "not available" rather than an
+    /// error from deep in the download path.
+    private func openPendingLink() {
+        guard let fileID = photoLinks.pendingFileID else { return }
+        if let item = library.allItems.first(where: { $0.fileID == fileID }) {
+            _ = photoLinks.consume()
+            linkedItem = item
+            return
+        }
+        // Not found *yet* is not "not available": wait for the walk to finish before saying so.
+        guard library.lastLoadedAt != nil, !library.isFillingIn, !library.isLoading else { return }
+        _ = photoLinks.consume()
+        showsLinkUnavailable = true
     }
 
     // MARK: - Importing

@@ -1144,15 +1144,20 @@ from the Notes app.
 
 **Deliverables**
 
-- [ ] iOS Share Sheet export of one or many photos (decrypted originals)
-- [ ] Neutrino share link for a photo or album, with the web viewer on the other end
-- [ ] Link permissions: view-only, download allowed, expiry
-- [ ] Share management: list active links, revoke
-- [ ] Universal Link inbound handling — `https://www.getneutrino.app/open/photo/<id>` opens the
-      app (the `applinks:` entitlement is already in `project.yml`); needs a router plus
-      `FeatureFlags.appLinks`
+- [x] iOS Share Sheet export of one or many photos (decrypted originals)
+- [ ] Neutrino share link for a photo or album, with the web viewer on the other end — *designed,
+      not built:* photos are end-to-end encrypted and the web share viewer cannot decrypt, so this
+      is a coordinated server + web + iOS change; see `neutrino/agent_docs/photo-sharing.md`
+      (wcherry/neutrino#241)
+- [ ] Link permissions: view-only, download allowed, expiry — *designed, as above*
+- [ ] Share management: list active links, revoke — *designed, as above*
+- [x] Universal Link inbound handling — `https://www.getneutrino.app/open/photo/<file id>` opens the
+      app (the `applinks:` entitlement is already in `project.yml`) — *the router is built and live;
+      iOS delivers the links to it once the web `photo` kind and the AASA entry exist
+      (photo-sharing.md §6)*
 
-**Flag:** `sharing`
+**Flag:** none — shipped live (wcherry/neutrino_photos_ios_mobile#23). The manual verification
+below is still owed on a device.
 
 **Manual verification**
 

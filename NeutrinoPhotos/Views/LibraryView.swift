@@ -25,6 +25,8 @@ struct LibraryView: View {
     @EnvironmentObject private var deviceLibrary: DevicePhotoLibrary
     /// Held only to hand on to the import sheet, which explains what it holds.
     @EnvironmentObject private var ledger: ImportLedger
+    /// Held only to hand on to the share sheet, which decrypts what it exports.
+    @EnvironmentObject private var content: MediaContentService
 
     /// What the picker handed back. Cleared as soon as the import starts so picking the same
     /// photographs twice in a row still fires — an unchanged selection is not a changed binding.
@@ -47,6 +49,8 @@ struct LibraryView: View {
     /// The selection being filed into an album. Captured at the moment the sheet opens rather than
     /// read live, so a library refresh mid-sheet cannot change what is being added under it.
     @State private var addingToAlbum: AlbumTarget?
+    /// The selection being exported to the Share Sheet.
+    @State private var sharing: ShareTarget?
 
     /// A selection on its way into an album.
     ///
@@ -142,6 +146,10 @@ struct LibraryView: View {
                         }
                     }
             }
+        }
+        .sheet(item: $sharing, onDismiss: { selection.end() }) { target in
+            ShareExportSheet(items: target.items)
+                .environmentObject(content)
         }
         .sheet(item: $addingToAlbum) { target in
             // Selection mode ends only on a *successful* add. Cancelling, or an add that partly
@@ -327,6 +335,9 @@ struct LibraryView: View {
             HStack(spacing: 0) {
                 action("Favorite", systemImage: allSelectedAreStarred ? "heart.fill" : "heart",
                        perform: toggleStarOnSelection)
+                action("Share", systemImage: "square.and.arrow.up") {
+                    sharing = ShareTarget(items: selectedItems)
+                }
                 action("Add To", systemImage: "rectangle.stack.badge.plus") {
                     addingToAlbum = AlbumTarget(items: selectedItems)
                 }
