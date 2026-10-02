@@ -4,11 +4,9 @@ import SwiftUI
 
 /// The signed-in app shell.
 ///
-/// Four tabs, fixed: the timeline, the collections that hang off it, search, and settings. Search
-/// is present without its epic behind it — a tab that appears once a flag flips would move the
-/// other three under the user's thumb, so the shell is the same shape in every build and the tab
-/// says what it doesn't do yet. People, Places, and Memories are views inside these tabs when they
-/// arrive, not tabs of their own — see `FeatureFlags`.
+/// Four tabs, fixed: the timeline, the collections that hang off it, search, and settings. People,
+/// Places, and Memories are views inside these tabs when they arrive, not tabs of their own, so the
+/// shell keeps the same shape as the app grows.
 ///
 /// Each tab keeps its own `NavigationStack` so opening an album in one does not disturb the others.
 struct ContentView: View {
@@ -36,16 +34,7 @@ struct ContentView: View {
             .tag(Tab.library)
 
             NavigationStack {
-                if FeatureFlags.albums {
-                    AlbumsView()
-                } else {
-                    TabPlaceholderView(
-                        title: "Albums aren't here yet",
-                        systemImage: "rectangle.stack",
-                        message: "Grouping photos into albums, and the collections beside them, arrive with the organization work."
-                    )
-                    .navigationTitle("Albums")
-                }
+                AlbumsView()
             }
             .tabItem { Label("Albums", systemImage: "rectangle.stack") }
             .tag(Tab.albums)

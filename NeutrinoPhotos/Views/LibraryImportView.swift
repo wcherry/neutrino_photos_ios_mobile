@@ -223,7 +223,7 @@ struct LibraryImportView: View {
 
     private var albumsSection: some View {
         Section {
-            LabeledContent("Albums", value: FeatureFlags.albums ? "Recreated" : "Not in this build")
+            LabeledContent("Albums", value: "Recreated")
             Toggle("Upload over Wi-Fi only", isOn: $settings.wifiOnlyUploads)
         } header: {
             Text("What Comes Across")

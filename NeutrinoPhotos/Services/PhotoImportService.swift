@@ -26,7 +26,7 @@ import NeutrinoCrypto
 /// `PhotosPicker` runs out of process and hands back only what the user picked, so this needs no
 /// photo-library authorization and the app never sees the rest of the roll. That is also why this
 /// cannot yet *watch* for new photographs: automatic backup needs `PHPhotoLibrary` and its
-/// permission prompt, which is `FeatureFlags.automaticBackup`.
+/// permission prompt, which is Epic 7's automatic backup.
 ///
 /// ## What library access adds, when it has been granted
 ///
@@ -79,7 +79,7 @@ final class PhotoImportService: ObservableObject {
     private let monitor: NetworkMonitor
 
     /// The device's own photo library, when the user has let the app see it. Optional throughout —
-    /// nil in tests and in a build with ``FeatureFlags/deviceLibraryAccess`` off — and every use of
+    /// nil in tests — and every use of
     /// it is a `?` followed by a fallback, because an import that *required* photo access would
     /// have thrown away the one property that makes the picker path worth having.
     private weak var deviceLibrary: DevicePhotoLibrary?
@@ -265,8 +265,7 @@ final class PhotoImportService: ObservableObject {
     // MARK: - The device's record of an item
 
     private func deviceAttributes(for pickerItem: PhotosPickerItem) -> DeviceAsset? {
-        guard FeatureFlags.deviceLibraryAccess else { return nil }
-        return deviceLibrary?.attributes(forLocalIdentifier: pickerItem.itemIdentifier)
+        deviceLibrary?.attributes(forLocalIdentifier: pickerItem.itemIdentifier)
     }
 
     // MARK: - Videos

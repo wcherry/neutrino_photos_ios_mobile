@@ -33,8 +33,8 @@ import NeutrinoCrypto
 /// ## What this is not
 ///
 /// Not background upload. The run needs the app to be in the foreground (a background task
-/// assertion buys the seconds after a home-press, no more), which is why the flag beside it is
-/// ``FeatureFlags/automaticBackup`` and why Epic 7 exists. What it *is* is a run that loses nothing
+/// assertion buys the seconds after a home-press, no more), which is why automatic backup is a
+/// separate piece of work, Epic 7. What it *is* is a run that loses nothing
 /// when the app goes away: everything is on the row before the next item starts.
 @MainActor
 final class LibraryImportService: ObservableObject {
@@ -214,11 +214,10 @@ final class LibraryImportService: ObservableObject {
     /// a shared album months after it was taken, has an old creation date and is still new here.
     func scan() async {
         guard !isBusy else { return }
-        guard FeatureFlags.fullLibraryImport else { return }
         // Checked before the permission, because it is the more fundamental refusal: asking
         // somebody for photo access and then telling them it cannot be used is the wrong order.
         //
-        // This is also the one place in this app where a missing database is not merely slower.
+        // This is the one place in this app where a missing database is not merely slower.
         // Everything else treats ``LocalStore`` as an accelerator and degrades; a resumable queue
         // with nowhere to persist itself is not a resumable queue, and one that silently restarted
         // from the beginning after every relaunch would be worse than saying so.
@@ -301,7 +300,7 @@ final class LibraryImportService: ObservableObject {
     /// - Returns: false when nothing could be queued, with ``phase`` carrying the reason.
     @discardableResult
     func importSelected(_ assets: [ScannedAsset]) async -> Bool {
-        guard FeatureFlags.fullLibraryImport, !assets.isEmpty else { return false }
+        guard !assets.isEmpty else { return false }
         guard let store else {
             phase = .paused("This device's library index is unavailable. Import with the photo picker instead.")
             return false
@@ -717,7 +716,7 @@ final class LibraryImportService: ObservableObject {
     /// may already be in albums the user has since edited by hand; adding it back on every
     /// incremental run would slowly undo their edits.
     private func fileIntoAlbums(_ titles: [String], photoID: String) async {
-        guard FeatureFlags.albums, let albums else { return }
+        guard let albums else { return }
         for title in titles {
             do {
                 let albumID: String

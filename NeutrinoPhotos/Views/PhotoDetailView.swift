@@ -184,53 +184,43 @@ struct PhotoDetailView: View {
         // Tightened from 36 when Save to Device made this five buttons: at 36 the row overflows a
         // 320 pt screen, and the first thing to fall off it is Delete.
         HStack(spacing: 28) {
-            if FeatureFlags.favorites {
-                Button {
-                    guard let current else { return }
-                    library.setStarred(id: current.id, isStarred: !current.isStarred)
-                } label: {
-                    Image(systemName: current?.isStarred == true ? "heart.fill" : "heart")
+            Button {
+                guard let current else { return }
+                library.setStarred(id: current.id, isStarred: !current.isStarred)
+            } label: {
+                Image(systemName: current?.isStarred == true ? "heart.fill" : "heart")
+            }
+            Button {
+                Task { await saveToDevice() }
+            } label: {
+                if isSaving {
+                    ProgressView()
+                        .tint(.white)
+                } else {
+                    Image(systemName: "square.and.arrow.down")
                 }
             }
-            if FeatureFlags.deviceLibraryAccess {
-                Button {
-                    Task { await saveToDevice() }
-                } label: {
-                    if isSaving {
-                        ProgressView()
-                            .tint(.white)
-                    } else {
-                        Image(systemName: "square.and.arrow.down")
-                    }
-                }
-                .disabled(isSaving)
+            .disabled(isSaving)
+            Button {
+                showsAlbumPicker = true
+            } label: {
+                Image(systemName: "rectangle.stack.badge.plus")
             }
-            if FeatureFlags.albums {
-                Button {
-                    showsAlbumPicker = true
-                } label: {
-                    Image(systemName: "rectangle.stack.badge.plus")
-                }
+            Button {
+                guard let current else { return }
+                library.setArchived(id: current.id, isArchived: !current.isArchived)
+            } label: {
+                Image(systemName: current?.isArchived == true
+                      ? "arrow.up.bin" : "archivebox")
             }
-            if FeatureFlags.archive {
-                Button {
-                    guard let current else { return }
-                    library.setArchived(id: current.id, isArchived: !current.isArchived)
-                } label: {
-                    Image(systemName: current?.isArchived == true
-                          ? "arrow.up.bin" : "archivebox")
-                }
-            }
-            if FeatureFlags.trash {
-                Button(role: .destructive) {
-                    guard let current else { return }
-                    library.trash(id: current.id)
-                    // Nothing left to look at once it is out of the timeline this viewer was
-                    // opened over.
-                    dismiss()
-                } label: {
-                    Image(systemName: "trash")
-                }
+            Button(role: .destructive) {
+                guard let current else { return }
+                library.trash(id: current.id)
+                // Nothing left to look at once it is out of the timeline this viewer was
+                // opened over.
+                dismiss()
+            } label: {
+                Image(systemName: "trash")
             }
         }
         .font(.title3)
@@ -482,10 +472,6 @@ private struct MediaPage: View {
 
         do {
             if item.kind == .video {
-                guard FeatureFlags.videoPlayback else {
-                    error = "Video playback isn't available in this build."
-                    return
-                }
                 // A video has to be decrypted to a file before it can be played: `AVPlayer` reads
                 // from a URL, and the Drive URL serves ciphertext no player could demux.
                 player = AVPlayer(url: try await content.localURL(for: item))

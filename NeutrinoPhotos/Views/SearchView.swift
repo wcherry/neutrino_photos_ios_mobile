@@ -4,9 +4,8 @@ import SwiftUI
 
 /// The Search tab.
 ///
-/// Present without its epic behind it: search needs a local index over the library, which is what
-/// `FeatureFlags.search` turns on. Until then the tab exists and says so, so the shell keeps the
-/// same four tabs in every build.
+/// Present before Epic 11 builds it: search needs a local index over the library. Until then the
+/// tab exists and says so, so the shell keeps the same four tabs.
 struct SearchView: View {
 
     @EnvironmentObject private var library: PhotoLibraryService

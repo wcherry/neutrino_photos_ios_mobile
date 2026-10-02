@@ -137,7 +137,7 @@ final class MediaImportPipeline {
 
     /// The favourite flag, the Live Photo motion, and the metadata — none of which is the picture.
     private func finish(item: MediaItem, bytes: Data, device: DeviceAsset?) async {
-        if device?.isFavorite == true, FeatureFlags.favorites {
+        if device?.isFavorite == true {
             // Optimistic and fire-and-forget, exactly as the star in the viewer is.
             library.setStarred(id: item.id, isStarred: true)
         }
@@ -167,7 +167,7 @@ final class MediaImportPipeline {
     /// where it was shot, and whether it is slow-motion or a time-lapse.
     private func finishVideo(item: MediaItem, device: DeviceAsset?) async {
         guard let device else { return }
-        if device.isFavorite, FeatureFlags.favorites {
+        if device.isFavorite {
             library.setStarred(id: item.id, isStarred: true)
         }
         guard let metadata = MediaMetadataExtractor.merged(nil, with: device) else { return }

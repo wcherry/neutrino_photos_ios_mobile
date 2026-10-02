@@ -61,13 +61,11 @@ struct AlbumsView: View {
         .refreshable { await albums.load() }
         .task {
             await albums.load()
-            if FeatureFlags.deviceLibraryAlbum {
-                // Re-read rather than trusted: photo permission is changed in Settings and iOS does
-                // not tell an app it happened, so a count cached from a grant that has since been
-                // revoked would sit on the row saying 2,431.
-                deviceLibrary.refresh()
-                deviceLibrary.refreshItemCount()
-            }
+            // Re-read rather than trusted: photo permission is changed in Settings and iOS does
+            // not tell an app it happened, so a count cached from a grant that has since been
+            // revoked would sit on the row saying 2,431.
+            deviceLibrary.refresh()
+            deviceLibrary.refreshItemCount()
         }
         .alert("New Album", isPresented: $showsNewAlbum) {
             TextField("Name", text: $newAlbumTitle)
@@ -109,23 +107,15 @@ struct AlbumsView: View {
     @ViewBuilder
     private var collections: some View {
         VStack(spacing: 0) {
-            if FeatureFlags.favorites {
-                collectionRow(.favorites, count: library.favorites.count)
-                divider
-            }
+            collectionRow(.favorites, count: library.favorites.count)
+            divider
             collectionRow(.recentlyAdded, count: library.recentlyAdded().count)
-            if FeatureFlags.archive {
-                divider
-                collectionRow(.archive, count: library.archived.count)
-            }
-            if FeatureFlags.trash {
-                divider
-                collectionRow(.trash, count: library.trashItems.count)
-            }
-            if FeatureFlags.deviceLibraryAlbum && FeatureFlags.deviceLibraryAccess {
-                divider
-                deviceLibraryRow
-            }
+            divider
+            collectionRow(.archive, count: library.archived.count)
+            divider
+            collectionRow(.trash, count: library.trashItems.count)
+            divider
+            deviceLibraryRow
         }
         .background(Color(.secondarySystemGroupedBackground))
         .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))

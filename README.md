@@ -42,20 +42,15 @@ its own Settings > Encryption page, chosen in the app or simply tapped in Files.
 | Favorites / Archive / Trash | Star, archive, delete, restore, empty, permanent delete, 30-day retention countdown | COMPLETE |
 | Albums | List, create, rename, delete, open, add and remove photos, cover art, bulk add from a selection | COMPLETE |
 | Recently Added | What reached the library lately, ordered by arrival rather than capture date | COMPLETE |
-| Settings | Account, grouping, appearance, Wi-Fi-only uploads, storage breakdown, cache, device name, roadmap | COMPLETE |
+| Settings | Account, grouping, appearance, Wi-Fi-only uploads, storage breakdown, cache, device name | COMPLETE |
 
-The shell is four tabs — Library, Albums, Search, Settings — and keeps that shape in every build.
-Search has no index behind it yet and says so; a tab that appeared when a flag flipped would move
-the other three under the user's thumb.
+The shell is four tabs — Library, Albums, Search, Settings — and keeps that shape as the app grows.
+Search has no index behind it yet and says so; a tab that appeared later would move the other three
+under the user's thumb.
 
-`FeatureFlags` is the honest list of what is *not* here yet: automatic backup, offline mode, search,
-places, people, memories, editing, sharing, and Universal Links. Each is a flag set to `false`
-rather than a half-built screen. Two flags are `true` and still worth naming, and both split off
-from `importFromPhotos` for the same reason: `deviceLibraryAccess` covers everything that talks to
-`PHPhotoLibrary` — the only thing in this app that asks for a permission the user can refuse — and
-`fullLibraryImport` covers the run that walks a whole camera roll unattended. A build with either
-off is a working app: one that never shows a photo-library prompt, and one whose import is exactly
-what you picked in the picker.
+The app has no feature flags. What is built is on; what is not built is not in the code. Not here
+yet: automatic backup, offline mode, search, places, people, memories, editing, sharing, and
+Universal Links — see `agent_docs/roadmap.md`.
 
 ## Architecture
 
@@ -362,7 +357,7 @@ list with its error, and there is a Retry button.
 
 What this is *not* is background upload: the run needs the app in the foreground, and
 `beginBackgroundTask` buys only the seconds after a home-press so the item in flight can finish.
-Uploading with the app closed needs a background `URLSession` and is `FeatureFlags.automaticBackup`.
+Uploading with the app closed needs a background `URLSession`, which is Epic 7's automatic backup.
 
 ## Known Gaps
 
@@ -377,8 +372,7 @@ instead of them.
 **No automatic backup.** A whole camera roll can now be moved across in one resumable run, but
 somebody has to start it and leave the app open. Nothing watches for *new* photographs: there is no
 `PHPhotoLibraryChangeObserver`, no background `URLSession`, and no `BGTaskScheduler` registration,
-so a picture taken with the Camera app sits there until the next import. That is
-`FeatureFlags.automaticBackup`, and it is `false`.
+so a picture taken with the Camera app sits there until the next import. That is Epic 7.
 
 **Album structure survives only as far as Drive can express it.** Neutrino albums are a flat list of
 titles containing photographs, so that is what a full import recreates — matched by title, created
@@ -396,8 +390,8 @@ detected and recorded now — is v1.1's Epic 16.
 **No offline mode.** The device's copy of the library is a cache, not a replica. A cold launch with
 no signal draws the timeline it drew last time and opens anything still in the media cache — but a
 favourite toggled with no network is lost when the request fails, a delete made on another device is
-invisible until the next listing, and there is no cursor to ask "what changed". `FeatureFlags.offlineMode`
-stays `false` until Epic 10 adds the sync engine and the queue behind it.
+invisible until the next listing, and there is no cursor to ask "what changed". That waits on
+Epic 10's sync engine and the queue behind it.
 
 **Preview renditions are ours alone.** The `Photo Previews` folder is a Drive folder like any other
 and today's web client neither writes nor reads it. It ignores it — the folder is outside the
@@ -462,5 +456,5 @@ regenerates the project, so remember to commit the bump.
 
 ## Roadmap
 
-`agent_docs/mvp.md` holds the full feature list and phasing. Settings > About > What's not here yet
-renders the same status from `FeatureFlags`, so the app and this document cannot drift apart.
+`agent_docs/mvp.md` holds the full feature list and phasing; `agent_docs/roadmap.md` breaks it into
+epics and records which have shipped.
