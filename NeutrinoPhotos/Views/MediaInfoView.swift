@@ -9,10 +9,29 @@ import SwiftUI
 /// which the panel says, rather than showing a column of blanks.
 struct MediaInfoView: View {
 
-    let item: MediaItem
+    /// The item as the sheet was opened on. What is drawn is ``item``, re-read from the library, so
+    /// an edit made from here shows the moment it is saved.
+    let opened: MediaItem
 
+    @EnvironmentObject private var library: PhotoLibraryService
     @EnvironmentObject private var settings: AppSettings
     @Environment(\.dismiss) private var dismiss
+
+    @State private var showsEditor = false
+
+    init(item: MediaItem) {
+        self.opened = item
+    }
+
+    private var item: MediaItem {
+        library.item(id: opened.id) ?? opened
+    }
+
+    /// Editing writes to the photo record, which a photograph in Recently Deleted no longer has a
+    /// live copy of.
+    private var canEdit: Bool {
+        item.deletedAt == nil
+    }
 
     /// "Live Photo", "RAW", "Panorama" — what Apple Photos would call this, where it would call it
     /// anything. Read off ``MediaDeviceFacts``, so it is present only for items imported by a device
@@ -45,6 +64,20 @@ struct MediaInfoView: View {
     var body: some View {
         NavigationStack {
             List {
+                if item.metadata?.title != nil || item.metadata?.caption != nil {
+                    Section {
+                        if let title = item.metadata?.title {
+                            Text(title)
+                                .font(.headline)
+                        }
+                        if let caption = item.metadata?.caption {
+                            Text(caption)
+                                .font(.subheadline)
+                                .textSelection(.enabled)
+                        }
+                    }
+                }
+
                 Section("File") {
                     row("Name", item.fileName)
                     row("Type", item.mimeType)
@@ -66,11 +99,18 @@ struct MediaInfoView: View {
                 }
 
                 if let exif = item.metadata?.exif, !exif.isEmpty {
+                    // One row per fact, each only when the file carried it — a missing field is
+                    // left out rather than shown as "0" or "—" pretending to be a reading.
                     Section("Camera") {
-                        if let make = exif.make { row("Make", make) }
-                        if let model = exif.model { row("Model", model) }
+                        if let camera = SearchIndex.cameraName(make: exif.make, model: exif.model) {
+                            row("Camera", camera)
+                        }
                         if let lens = exif.lensModel { row("Lens", lens) }
-                        if let summary = exif.exposureSummary { row("Exposure", summary) }
+                        if let fNumber = exif.fNumber {
+                            row("Aperture", String(format: "ƒ/%.1f", fNumber))
+                        }
+                        if let exposure = exif.exposureTime { row("Shutter speed", exposure) }
+                        if let iso = exif.iso { row("ISO", "\(iso)") }
                         if let focal = exif.focalLength {
                             row("Focal length", String(format: "%.0f mm", focal))
                         }
@@ -107,9 +147,17 @@ struct MediaInfoView: View {
             .navigationTitle("Info")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
+                if canEdit {
+                    ToolbarItem(placement: .cancellationAction) {
+                        Button("Edit") { showsEditor = true }
+                    }
+                }
                 ToolbarItem(placement: .confirmationAction) {
                     Button("Done") { dismiss() }
                 }
+            }
+            .sheet(isPresented: $showsEditor) {
+                MediaDetailsEditView(item: item)
             }
         }
     }
