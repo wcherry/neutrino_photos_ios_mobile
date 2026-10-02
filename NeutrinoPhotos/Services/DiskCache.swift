@@ -172,6 +172,29 @@ final class DiskCache: @unchecked Sendable {
         return entries().reduce(into: Int64(0)) { $0 += $1.size }
     }
 
+    /// Bytes held by the files whose names pass `predicate` — how the storage dashboard tells the
+    /// full-size originals in a cache apart from the previews beside them.
+    func totalBytes(whereFileName predicate: (String) -> Bool) -> Int64 {
+        lock.lock()
+        defer { lock.unlock() }
+        return entries()
+            .filter { predicate($0.url.lastPathComponent) }
+            .reduce(into: Int64(0)) { $0 += $1.size }
+    }
+
+    /// Deletes the files whose names pass `predicate`, answering the bytes freed.
+    @discardableResult
+    func removeAll(whereFileName predicate: (String) -> Bool) -> Int64 {
+        lock.lock()
+        defer { lock.unlock() }
+        var freed: Int64 = 0
+        for entry in entries() where predicate(entry.url.lastPathComponent) {
+            guard (try? FileManager.default.removeItem(at: entry.url)) != nil else { continue }
+            freed += entry.size
+        }
+        return freed
+    }
+
     /// Deletes the least recently used files until the cache is comfortably under its cap.
     func evictIfNeeded() {
         lock.lock()
