@@ -412,6 +412,13 @@ struct LibraryView: View {
                        systemImage: "exclamationmark.circle", tint: .red)
             }
             lockedBanner
+            // A pull to refresh lets go once the newest page is in, but the rest of a large library
+            // is still being re-read behind it — and deletions only land when that finishes. Without
+            // this the walk was invisible, and its ending looked like a refresh nobody asked for.
+            if library.isRefreshing && library.error == nil && !selection.isActive {
+                banner("Checking for changes…", systemImage: "arrow.triangle.2.circlepath",
+                       tint: .secondary, accessory: .progress)
+            }
             if let error = library.error {
                 // Tappable, which the plain banner was not. A refresh that failed leaves the only
                 // way back a pull on the grid — and the grid is empty in exactly the case the
