@@ -63,8 +63,8 @@ targets:
         # than in Safari. Both host spellings are claimed so a link pasted without the "www."
         # still resolves. Which *paths* reach this app is decided by the apple-app-site-association
         # document served from the domain — see `deploy/apple-app-site-association` in the Drive
-        # repository — not by this list. The app ignores inbound links until a router exists to
-        # handle them.
+        # repository — not by this list, and today it routes no `/open/photo/*` paths here, so iOS
+        # opens them in Safari. `PhotoLinkRouter` handles them once it does.
         #
         # `webcredentials:` is what lets the vault's passkey unlock work. A passkey enrolled on the
         # web is bound to that page's domain as its relying party, and iOS will only hand this app
