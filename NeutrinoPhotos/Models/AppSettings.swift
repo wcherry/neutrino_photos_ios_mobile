@@ -55,6 +55,7 @@ final class AppSettings: ObservableObject {
         static let hidesUploadedDeviceItems = "settings.hidesUploadedDeviceItems"
         static let slideshowInterval = "settings.slideshowInterval"
         static let slideshowTransition = "settings.slideshowTransition"
+        static let recentSearches = "search.recent"
     }
 
     // MARK: - Published settings
@@ -127,6 +128,29 @@ final class AppSettings: ObservableObject {
         didSet { defaults.set(slideshowTransition.rawValue, forKey: Keys.slideshowTransition) }
     }
 
+    /// What was searched for lately, newest first — offered again when the search field is empty.
+    /// Kept on this device only: a list of what somebody looked for is theirs, and nothing on the
+    /// server needs it.
+    @Published private(set) var recentSearches: [String] {
+        didSet { defaults.set(recentSearches, forKey: Keys.recentSearches) }
+    }
+
+    static let recentSearchLimit = 10
+
+    /// Puts a search at the top of the recent list, once — searching for the same thing twice moves
+    /// it up rather than listing it twice.
+    func recordSearch(_ text: String) {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        var recent = recentSearches.filter { $0.caseInsensitiveCompare(trimmed) != .orderedSame }
+        recent.insert(trimmed, at: 0)
+        recentSearches = Array(recent.prefix(Self.recentSearchLimit))
+    }
+
+    func clearRecentSearches() {
+        recentSearches = []
+    }
+
     /// The range the slideshow's interval control offers.
     static let slideshowIntervalRange: ClosedRange<TimeInterval> = 2...30
     static let defaultSlideshowInterval: TimeInterval = 5
@@ -160,6 +184,7 @@ final class AppSettings: ObservableObject {
             ?? Self.defaultSlideshowInterval
         self.slideshowInterval = min(max(interval, Self.slideshowIntervalRange.lowerBound),
                                      Self.slideshowIntervalRange.upperBound)
+        self.recentSearches = defaults.stringArray(forKey: Keys.recentSearches) ?? []
         self.slideshowTransition = SlideshowTransition(
             rawValue: defaults.string(forKey: Keys.slideshowTransition) ?? ""
         ) ?? .dissolve

@@ -791,6 +791,103 @@ final class PhotoLibraryService: ObservableObject {
         }
     }
 
+    // MARK: - Details
+
+    /// Why an edit to a photograph's details did not stick.
+    enum DetailsEditError: LocalizedError {
+        case notInLibrary
+        /// The server answered, but with the old date — a server from before `captureDate` was
+        /// accepted, which ignores the field rather than refusing it.
+        case dateNotSupported
+
+        var errorDescription: String? {
+            switch self {
+            case .notInLibrary:
+                return "This photo is no longer in your library."
+            case .dateNotSupported:
+                return "Your Neutrino server doesn't support changing a photo's date yet."
+            }
+        }
+    }
+
+    /// Changes a photograph's date, title and caption — Epic 11's metadata editing.
+    ///
+    /// Applied on the device first, so the timeline moves the photograph and the info sheet shows
+    /// the new title at once; put back exactly as it was if either write fails, and the error is
+    /// thrown so the edit sheet can say so rather than leaving the user believing it saved.
+    ///
+    /// Two requests, because the server keeps them in two places: the date is a column the timeline
+    /// sorts on (`PATCH /photos/{id}`), and the title and caption live in the metadata document
+    /// (`PUT /photos/{id}/metadata`). Only the ones that changed are sent.
+    ///
+    /// - Parameters:
+    ///   - title: nil or empty to remove it.
+    ///   - caption: nil or empty to remove it.
+    func editDetails(id: String, captureDate: Date, title: String?, caption: String?,
+                     publishingLocation: Bool) async throws {
+        guard let index = allItems.firstIndex(where: { $0.id == id }) else {
+            throw DetailsEditError.notInLibrary
+        }
+        let previous = allItems[index]
+        let title = Self.normalized(title)
+        let caption = Self.normalized(caption)
+        let dateChanged = previous.captureDate.map { abs($0.timeIntervalSince(captureDate)) >= 1 } ?? true
+        let textChanged = title != previous.metadata?.title || caption != previous.metadata?.caption
+        guard dateChanged || textChanged else { return }
+
+        var edited = previous
+        edited.captureDate = captureDate
+        var metadata = previous.metadata ?? MediaMetadata()
+        metadata.title = title
+        metadata.caption = caption
+        edited.metadata = metadata
+        allItems[index] = edited
+
+        do {
+            var record = try await registered(previous)
+            if dateChanged {
+                let body = APIUpdatePhotoRequest(isStarred: nil, isArchived: nil,
+                                                 captureDate: Self.rfc3339.string(from: captureDate))
+                let updated: MediaItem = try await api.patch("/api/v1/photos/\(record.id)",
+                                                             body: body, decoder: Self.decoder)
+                guard let stored = updated.captureDate,
+                      abs(stored.timeIntervalSince(captureDate)) < 1 else {
+                    throw DetailsEditError.dateNotSupported
+                }
+                record = updated
+            }
+            if textChanged {
+                let published = publishingLocation ? metadata : metadata.withoutLocation
+                _ = try await api.send(method: "PUT", path: "/api/v1/photos/\(record.id)/metadata",
+                                       json: published)
+            }
+            // Re-applied by id: registering a Drive-only item swaps the record in under a new one.
+            if let index = allItems.firstIndex(where: { $0.id == record.id }) {
+                allItems[index].captureDate = captureDate
+                allItems[index].metadata = metadata
+                try? await store?.save(allItems[index])
+            }
+        } catch {
+            logger.error("details edit failed: id=\(id, privacy: .public) \(error, privacy: .public)")
+            if let index = allItems.firstIndex(where: { $0.id == previous.id }) {
+                allItems[index] = previous
+            }
+            throw error
+        }
+    }
+
+    private static func normalized(_ text: String?) -> String? {
+        guard let trimmed = text?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !trimmed.isEmpty else { return nil }
+        return trimmed
+    }
+
+    private static let rfc3339: ISO8601DateFormatter = {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime]
+        return formatter
+    }()
+
     // MARK: - Favorites / Archive
 
     func setStarred(id: String, isStarred: Bool) {
@@ -960,4 +1057,6 @@ private struct APIRegisterPhotoRequest: Encodable {
 private struct APIUpdatePhotoRequest: Encodable {
     let isStarred: Bool?
     let isArchived: Bool?
+    /// RFC 3339. Only sent by ``PhotoLibraryService/editDetails(id:captureDate:title:caption:)``.
+    var captureDate: String?
 }
