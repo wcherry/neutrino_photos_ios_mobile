@@ -7,7 +7,8 @@ import NeutrinoUI
 // MARK: - NeutrinoPhotosApp
 
 /// Composition root. Every service is constructed once here and injected into the view tree;
-/// nothing reaches for a singleton.
+/// nothing reaches for a singleton — except ``ExternalDisplayService``, whose scene delegate UIKit
+/// builds itself.
 ///
 /// The wiring is deliberately explicit rather than hidden behind a container. The graph is small
 /// and one-directional — everything that talks to the server goes through a single `APIClient`,
@@ -15,6 +16,9 @@ import NeutrinoUI
 /// out says more than a registration list would.
 @main
 struct NeutrinoPhotosApp: App {
+
+    /// Routes an external display's scene to ``ExternalDisplaySceneDelegate``; nothing else.
+    @UIApplicationDelegateAdaptor(PhotosAppDelegate.self) private var appDelegate
 
     // MARK: - Services
 
@@ -39,6 +43,8 @@ struct NeutrinoPhotosApp: App {
     @StateObject private var deviceBrowser: DeviceLibraryBrowser
     @StateObject private var keyFiles: KeyFileRouter
     @StateObject private var keyProvisioning = KeyProvisioningService()
+    /// The one shared instance — see ``ExternalDisplayService`` for why it is.
+    @StateObject private var externalDisplay = ExternalDisplayService.shared
 
     /// The device's copy of the library. Optional because opening a database can fail — a full
     /// disk, a device the user has locked out of its own storage — and every consumer treats it as
@@ -140,6 +146,7 @@ struct NeutrinoPhotosApp: App {
                 .environmentObject(deviceLibrary)
                 .environmentObject(deviceBrowser)
                 .environmentObject(keyFiles)
+                .environmentObject(externalDisplay)
                 .preferredColorScheme(settings.theme.colorScheme)
                 .task { await configure() }
                 // Photo-library permission is changed in Settings, and iOS does not tell an app it

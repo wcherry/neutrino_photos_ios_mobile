@@ -31,6 +31,10 @@ struct AlbumDetailView: View {
     /// Held only to hand on to the viewer, which opens on a cell's cover thumbnail.
     @EnvironmentObject private var thumbnails: ThumbnailCache
     @EnvironmentObject private var deviceLibrary: DevicePhotoLibrary
+    /// Held only to hand on to the slideshow, which loads its own pictures.
+    @EnvironmentObject private var content: MediaContentService
+    @EnvironmentObject private var settings: AppSettings
+    @EnvironmentObject private var externalDisplay: ExternalDisplayService
 
     @State private var items: [MediaItem] = []
     @State private var isLoading = false
@@ -39,6 +43,7 @@ struct AlbumDetailView: View {
     @State private var error: String?
     @State private var viewerStart: MediaItem?
     @State private var removing: MediaItem?
+    @State private var showsSlideshow = false
 
     private let columns = Array(repeating: GridItem(.flexible(), spacing: 2), count: 3)
 
@@ -70,6 +75,16 @@ struct AlbumDetailView: View {
                         .foregroundStyle(.secondary)
                 }
             }
+            if FeatureFlags.slideshow {
+                ToolbarItem(placement: .primaryAction) {
+                    Button {
+                        showsSlideshow = true
+                    } label: {
+                        Label("Play Slideshow", systemImage: "play.fill")
+                    }
+                    .disabled(slideshowItems.isEmpty)
+                }
+            }
         }
         .refreshable { await load() }
         .task { await load() }
@@ -77,6 +92,11 @@ struct AlbumDetailView: View {
             PhotoDetailView(items: items, initialID: start.id)
                 .environmentObject(thumbnails)
                 .environmentObject(deviceLibrary)
+        }
+        .fullScreenCover(isPresented: $showsSlideshow) {
+            SlideshowView(controller: makeSlideshow())
+                .environmentObject(settings)
+                .environmentObject(externalDisplay)
         }
         .confirmationDialog("Remove from “\(album.title)”?",
                             isPresented: Binding(get: { removing != nil },
@@ -158,6 +178,28 @@ struct AlbumDetailView: View {
 
     private var countLabel: String {
         items.count == 1 ? "1 photo" : "\(items.count) photos"
+    }
+
+    /// What a slideshow plays: the album's photographs, in album order. Videos are left out — a
+    /// slideshow moves on by the clock, and a video would either be cut off or hold the room for
+    /// however long it runs.
+    private var slideshowItems: [MediaItem] {
+        items.filter { $0.kind == .photo }
+    }
+
+    private func makeSlideshow() -> SlideshowController {
+        // Captured rather than read through `self` later: the cover outlives any one render of this
+        // view, and these are reference types that stay valid for the whole launch.
+        let content = content
+        let thumbnails = thumbnails
+        return SlideshowController(
+            items: slideshowItems,
+            interval: settings.slideshowInterval,
+            transition: settings.slideshowTransition,
+            display: externalDisplay,
+            placeholder: { await thumbnails.image(for: $0) },
+            loader: { try await content.image(for: $0, rendition: .preview) }
+        )
     }
 
     private func load() async {
