@@ -109,6 +109,13 @@ enum FeatureFlags {
     /// remove a screen; it would remove the thing every screen reads through.
     static let mediaPipeline: Bool = true
 
+    /// Playing an album as a slideshow — on the phone, or on an external display (AirPlay or a
+    /// cable) with the phone as the remote. The Play button in an album, and nothing else.
+    ///
+    /// Not Memories' presentation (``memories``): no music, titles or generated story — the album's
+    /// photographs, in order, at the pace and with the transition the user picks.
+    static let slideshow: Bool = true
+
     // MARK: - Not yet implemented
 
     /// Automatic background backup of new camera-roll items (`BGTaskScheduler`, upload queue,

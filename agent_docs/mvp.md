@@ -486,7 +486,7 @@ Display and edit:
 - [ ] Quick Actions
 - [ ] iPad multitasking
 - [ ] iPad keyboard shortcuts
-- [ ] External display support
+- [x] External display support (album slideshows — AirPlay or cable, phone as the remote)
 
 ### App Intents
 

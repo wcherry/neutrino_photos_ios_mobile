@@ -92,6 +92,18 @@ targets:
         # it here — App Store Connect rejects the upload with error 90713 without it.
         CFBundleIconName: AppIcon
         UILaunchScreen: {}
+        # Slideshows on an external display (AirPlay, a cable adapter). iOS hands the app a scene
+        # for the display only if the app declares a configuration for that role *here* —
+        # answering `configurationForConnecting` in code alone is not enough, and without this the
+        # system just mirrors the phone. The app's own scene is left out on purpose: SwiftUI's
+        # `WindowGroup` supplies it. Multiple scenes stay off, so iPad does not grow multi-window
+        # support as a side effect. Same declaration as Neutrino Slides.
+        UIApplicationSceneManifest:
+          UIApplicationSupportsMultipleScenes: false
+          UISceneConfigurations:
+            UIWindowSceneSessionRoleExternalDisplayNonInteractive:
+              - UISceneConfigurationName: External Display
+                UISceneDelegateClassName: $(PRODUCT_MODULE_NAME).ExternalDisplaySceneDelegate
         UISupportedInterfaceOrientations:
           - UIInterfaceOrientationPortrait
           - UIInterfaceOrientationLandscapeLeft

@@ -53,6 +53,8 @@ final class AppSettings: ObservableObject {
         static let publishesLocation = "settings.publishesLocation"
         static let importsLiveMotion = "settings.importsLiveMotion"
         static let hidesUploadedDeviceItems = "settings.hidesUploadedDeviceItems"
+        static let slideshowInterval = "settings.slideshowInterval"
+        static let slideshowTransition = "settings.slideshowTransition"
     }
 
     // MARK: - Published settings
@@ -114,6 +116,21 @@ final class AppSettings: ObservableObject {
         didSet { defaults.set(hidesUploadedDeviceItems, forKey: Keys.hidesUploadedDeviceItems) }
     }
 
+    /// Seconds each photograph stays up in a slideshow. Remembered so the next slideshow starts at
+    /// the pace the last one was left at, rather than making the user find it again every time.
+    @Published var slideshowInterval: TimeInterval {
+        didSet { defaults.set(slideshowInterval, forKey: Keys.slideshowInterval) }
+    }
+
+    /// How one photograph gives way to the next in a slideshow.
+    @Published var slideshowTransition: SlideshowTransition {
+        didSet { defaults.set(slideshowTransition.rawValue, forKey: Keys.slideshowTransition) }
+    }
+
+    /// The range the slideshow's interval control offers.
+    static let slideshowIntervalRange: ClosedRange<TimeInterval> = 2...30
+    static let defaultSlideshowInterval: TimeInterval = 5
+
     // MARK: - Private
 
     private let defaults: UserDefaults
@@ -139,6 +156,13 @@ final class AppSettings: ObservableObject {
             defaults.object(forKey: Keys.importsLiveMotion) as? Bool ?? true
         self.hidesUploadedDeviceItems =
             defaults.object(forKey: Keys.hidesUploadedDeviceItems) as? Bool ?? false
+        let interval = defaults.object(forKey: Keys.slideshowInterval) as? Double
+            ?? Self.defaultSlideshowInterval
+        self.slideshowInterval = min(max(interval, Self.slideshowIntervalRange.lowerBound),
+                                     Self.slideshowIntervalRange.upperBound)
+        self.slideshowTransition = SlideshowTransition(
+            rawValue: defaults.string(forKey: Keys.slideshowTransition) ?? ""
+        ) ?? .dissolve
     }
 
     // MARK: - Reset
@@ -151,5 +175,7 @@ final class AppSettings: ObservableObject {
         publishesLocationMetadata = false
         importsLivePhotoMotion = true
         hidesUploadedDeviceItems = false
+        slideshowInterval = Self.defaultSlideshowInterval
+        slideshowTransition = .dissolve
     }
 }
