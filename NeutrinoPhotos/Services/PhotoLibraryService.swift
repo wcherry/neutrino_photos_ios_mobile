@@ -151,6 +151,17 @@ final class PhotoLibraryService: ObservableObject {
         return LibraryFillProgress(loaded: allItems.count, total: total)
     }
 
+    /// True while a library that is already on screen is being re-read behind it.
+    ///
+    /// The other half of ``fillProgress``. A refresh over a full timeline is the same walk as a
+    /// first fill, but there is no "of" to count towards — the grid already holds the whole
+    /// library — so the footer stays away and nothing on screen said the walk was happening. For
+    /// a large library that is minutes of a pull to refresh looking like it did nothing, followed
+    /// by deletions landing out of nowhere when the walk finished.
+    var isRefreshing: Bool {
+        isFillingIn && !allItems.isEmpty && fillProgress == nil
+    }
+
     /// The items the timeline should show, newest first.
     func timeline(showingArchived: Bool) -> [MediaItem] {
         allItems
@@ -277,8 +288,8 @@ final class PhotoLibraryService: ObservableObject {
     /// ## What it declines to do
     ///
     /// Start a walk over one already running, or a second one inside a minute. A refresh over a
-    /// timeline that is already on screen swaps it only when the walk *finishes* — see
-    /// ``fillIn(after:streamingIntoTheTimeline:)`` — so overlapping walks would be cost with
+    /// timeline that is already on screen only reconciles deletions when the walk *finishes* —
+    /// see ``fillIn(after:streamingIntoTheTimeline:)`` — so overlapping walks would be cost with
     /// nothing to show for it, and the later one would finish holding the older answer.
     ///
     /// - Parameter now: injected by the tests, which have to be able to age a timeline without
@@ -306,7 +317,7 @@ final class PhotoLibraryService: ObservableObject {
         // page can be shown the moment it lands; a refresh — or a launch over a hydrated cache —
         // is looking at a full timeline, and truncating that to two hundred rows to refill it
         // would be a visible collapse under the reader's thumb. Same walk either way; the flag
-        // only decides whether it is assembled on screen or off it.
+        // only decides whether pages are appended as they land or folded into what is there.
         let timelineIsEmpty = allItems.isEmpty
 
         do {
@@ -318,6 +329,11 @@ final class PhotoLibraryService: ObservableObject {
                 let merged = mergingDeviceOnlyMetadata(into: first.photos)
                 allItems = merged
                 await save(merged)
+            } else {
+                // The newest photographs are on this page, which makes it the one a pull to refresh
+                // is almost always pulling for — so it lands before the spinner goes away rather
+                // than when the rest of the walk finishes, minutes later on a large library.
+                await upsert(first.photos)
             }
             logger.debug("first page: \(first.photos.count) of \(first.total)")
 
@@ -457,6 +473,8 @@ final class PhotoLibraryService: ObservableObject {
                     let merged = mergingDeviceOnlyMetadata(into: fresh)
                     allItems.append(contentsOf: merged)
                     await save(merged)
+                } else if !streaming {
+                    await upsert(fresh)
                 }
 
                 if next.photos.count < Self.pageSize { break }
@@ -600,6 +618,41 @@ final class PhotoLibraryService: ObservableObject {
             records.append(try await registered(item))
         }
         return records
+    }
+
+    /// Folds a page of records into a timeline that is already on screen, taking nothing out of it.
+    ///
+    /// New photographs and changed ones show as soon as their page arrives; removals wait for the
+    /// walk to finish, because only a whole walk can say what the server no longer has. Assigns
+    /// ``allItems`` only when the page actually changed something, so an unchanged library costs
+    /// a refresh no regrouping at all.
+    private func upsert(_ records: [MediaItem]) async {
+        guard !records.isEmpty else { return }
+        let merged = mergingDeviceOnlyMetadata(into: records)
+        let positions = Dictionary(allItems.enumerated().map { ($1.id, $0) },
+                                   uniquingKeysWith: { first, _ in first })
+        var next = allItems
+        var changed: [MediaItem] = []
+        for item in merged {
+            if let index = positions[item.id] {
+                guard next[index] != item else { continue }
+                next[index] = item
+            } else {
+                next.append(item)
+            }
+            changed.append(item)
+        }
+
+        // A record for a file shown as Drive-only means it was registered elsewhere since; the
+        // record replaces it, or the grid would show the photograph twice until the walk ends.
+        let recordFileIDs = Set(merged.map(\.fileID))
+        let superseded = next.contains { $0.isDriveOnly && recordFileIDs.contains($0.fileID) }
+        guard !changed.isEmpty || superseded else { return }
+        if superseded {
+            next.removeAll { $0.isDriveOnly && recordFileIDs.contains($0.fileID) }
+        }
+        allItems = next
+        await save(changed)
     }
 
     /// Writes a batch to the device's copy, yielding between items.

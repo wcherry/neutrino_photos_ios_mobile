@@ -255,6 +255,26 @@ final class PhotoLibraryServiceTests: XCTestCase {
                        "the refresh's first page must not replace the library with itself")
     }
 
+    /// Pull to refresh lets go after the first page, so a photograph added elsewhere has to be on
+    /// screen by then — not minutes later, when a large library's walk finishes.
+    func testARefreshShowsNewPhotographsWithoutWaitingForTheWalk() async {
+        let photos = (0..<1000).map { Fixture.photoJSON(id: "p\($0)", fileID: "f\($0)") }
+        MockURLProtocol.respondWithPagedListing(photos)
+        await sut.loadEverything()
+
+        MockURLProtocol.respondWithPagedListing([Fixture.photoJSON(id: "new", fileID: "f-new")] + photos)
+        await sut.load()
+
+        XCTAssertNotNil(sut.item(id: "new"), "the newest page should land before the spinner goes")
+        XCTAssertEqual(sut.allItems.count, 1001)
+        XCTAssertTrue(sut.isRefreshing, "the rest of the walk should read as a refresh, not a fill")
+        XCTAssertNil(sut.fillProgress, "nothing is missing, so there is nothing to count towards")
+
+        await sut.loadEverything()
+        XCTAssertEqual(sut.allItems.count, 1001)
+        XCTAssertFalse(sut.isRefreshing)
+    }
+
     /// A walk that finishes is authoritative, and that is what takes a photo deleted on another
     /// device off this one.
     func testACompletedRefreshDropsWhatTheServerNoLongerLists() async {
