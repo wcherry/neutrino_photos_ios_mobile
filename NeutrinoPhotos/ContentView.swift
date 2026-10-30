@@ -1,4 +1,6 @@
 import SwiftUI
+import NeutrinoCore
+import NeutrinoUI
 
 // MARK: - ContentView
 
@@ -16,6 +18,7 @@ struct ContentView: View {
     /// Held, like ``importer``, only to know whether this device is mid-import — see
     /// ``isImporting``.
     @EnvironmentObject private var libraryImporter: LibraryImportService
+    @EnvironmentObject private var monitor: NetworkMonitor
 
     @Environment(\.scenePhase) private var scenePhase
 
@@ -71,6 +74,16 @@ struct ContentView: View {
             guard tab == .library, !isImporting else { return }
             Task { await library.refreshIfStale() }
         }
+        // Coming back online is the fourth: whatever was loaded offline came from the cache, and a
+        // load that failed while offline left its error on screen. Not throttled — the stale check
+        // would skip a library last refreshed a minute ago, just before the connection dropped.
+        .onChange(of: monitor.isOnline) { online in
+            guard online, !isImporting else { return }
+            Task { await library.load() }
+        }
+        // Photos queues nothing made offline — an import waits for the network and says so in its
+        // own banner — so the strip only says what the library is showing.
+        .connectivityBanner(isOnline: monitor.isOnline, keepsChangesOffline: false)
     }
 
     // MARK: - Importing
