@@ -34,8 +34,29 @@ final class PhotoLibraryService: ObservableObject {
 
     /// Every live item, archived ones included. Filtering for the timeline happens in
     /// ``timeline(showingArchived:)`` so toggling the setting does not need a refetch.
+    ///
+    /// Never a Live Photo's clip that a still in here claims: those are registered photos too (the
+    /// platform convention, `neutrino/agent_docs/live-photos.md`), but one thing photographed is one
+    /// tile, so every assignment sets them aside into ``livePhotoClips`` — which keeps them out of
+    /// the timeline, albums, search and every count without each of those having to know.
     @Published private(set) var allItems: [MediaItem] = [] {
-        didSet { revision &+= 1 }
+        didSet {
+            setAsideClaimedClips()
+            revision &+= 1
+        }
+    }
+
+    /// Registered Live Photo clips that a still claims, by photo id — see ``allItems``.
+    private(set) var livePhotoClips: [String: MediaItem] = [:]
+
+    /// Moves the claimed clips out of ``allItems``. Cheap when there is nothing to move, which is
+    /// almost every call: one pass to find the stills' links, and nothing more if no video matches.
+    private func setAsideClaimedClips() {
+        let claimed = LivePhotoPairing.claimedClipIDs(in: allItems)
+        guard !claimed.isEmpty else { return }
+        for item in allItems where claimed.contains(item.id) { livePhotoClips[item.id] = item }
+        // Assigning inside the property's own `didSet` doesn't call it again.
+        allItems.removeAll { claimed.contains($0.id) }
     }
 
     /// Bumped every time ``allItems`` changes, in any way.
@@ -209,6 +230,7 @@ final class PhotoLibraryService: ObservableObject {
     func containsFile(id fileID: String) -> Bool {
         allItems.contains { $0.fileID == fileID && !$0.isDriveOnly }
             || trashItems.contains { $0.fileID == fileID }
+            || livePhotoClips.values.contains { $0.fileID == fileID }
     }
 
     // MARK: - Loading
@@ -756,7 +778,9 @@ final class PhotoLibraryService: ObservableObject {
         )
         let item: MediaItem = try await api.post("/api/v1/photos", body: body, decoder: Self.decoder)
         // Inserted at the front rather than appended: the timeline sorts by date anyway, but a
-        // caller reading `allItems` before that sort expects the newest first.
+        // caller reading `allItems` before that sort expects the newest first. A file already
+        // registered answers with its existing record, which must not then be listed twice.
+        allItems.removeAll { $0.id == item.id }
         allItems.insert(item, at: 0)
         try? await store?.save(item)
         logger.debug("register succeeded: id=\(item.id, privacy: .public)")
@@ -782,7 +806,7 @@ final class PhotoLibraryService: ObservableObject {
     /// info panel is complete and offline the moment the import finishes.
     ///
     /// Only the non-locating half leaves the device unless the user has said otherwise —
-    /// see ``AppSettings/publishesLocationMetadata``. `PUT /api/v1/photos/{id}/metadata` stores a
+    /// see ``AppSettings/publishesLocationMetadata``. `/api/v1/photos/{id}/metadata` stores a
     /// plaintext JSON blob, and `GET /api/v1/photos/map` reads exactly the two GPS keys out of it,
     /// so publishing coordinates is what makes Places work *and* is a list of where somebody has
     /// been sitting beside a library the server otherwise cannot open.
@@ -797,23 +821,128 @@ final class PhotoLibraryService: ObservableObject {
         if let index = allItems.firstIndex(where: { $0.id == id }) {
             allItems[index].metadata = metadata
             try? await store?.save(allItems[index])
+        } else if var clip = livePhotoClips[id] {
+            clip.metadata = metadata
+            livePhotoClips[id] = clip
+            try? await store?.save(clip)
         }
 
         let published = publishingLocation ? metadata : metadata.withoutLocation
         do {
-            _ = try await api.send(method: "PUT", path: "/api/v1/photos/\(id)/metadata",
-                                   json: published)
+            let patch = try published.mergePatch(
+                removing: publishingLocation ? [] : MediaMetadata.locationPaths)
+            try await writeMetadata(id: id, patch: patch, whole: published)
             logger.debug("metadata published for \(id, privacy: .public) (location=\(publishingLocation))")
         } catch {
             logger.error("metadata publish failed for \(id, privacy: .public): \(error, privacy: .public)")
         }
     }
 
+    /// Merges `patch` into a record's metadata on the server (`PATCH`, RFC 7396) — never a
+    /// whole-document write, which would erase every key this build doesn't model: another
+    /// client's, or a later build's. That is rule 4 of `neutrino/agent_docs/live-photos.md`.
+    ///
+    /// `whole` is for a server from before the merge endpoint, which answers 404 or 405 to it: the
+    /// old `PUT` is the only write it has, so that is what it gets. Nil to give up instead — for a
+    /// write that is only worth making if it can't clobber anything.
+    func writeMetadata(id: String, patch: JSONValue, whole: MediaMetadata?) async throws {
+        do {
+            _ = try await api.send(method: "PATCH", path: "/api/v1/photos/\(id)/metadata", json: patch)
+        } catch APIError.server(let status) where (status == 404 || status == 405) && whole != nil {
+            logger.info("metadata merge unsupported (\(status)); writing the whole document")
+            _ = try await api.send(method: "PUT", path: "/api/v1/photos/\(id)/metadata", json: whole)
+        }
+    }
+
+    // MARK: - Live Photos
+
+    /// Registers a Live Photo's clip as a photo of its own, carrying `motionPhoto` — rule 2 of the
+    /// platform convention, which is how the web finds and labels it. The still's
+    /// ``MediaDeviceFacts/liveVideoFileID`` claims it, so it never shows as a second tile here; see
+    /// ``allItems``. Merged rather than written whole, so a clip some other client registered
+    /// first keeps what that client put on it.
+    @discardableResult
+    func registerLivePhotoClip(fileID: String, motion: MotionPhotoFacts, captureDate: Date?,
+                               allowingWholeWrite: Bool = true) async throws -> MediaItem {
+        let clip = try await register(fileID: fileID, captureDate: captureDate)
+        let patch = JSONValue.object(["motionPhoto": try JSONValue(encoding: motion)])
+        try await writeMetadata(id: clip.id, patch: patch,
+                                whole: allowingWholeWrite ? MediaMetadata(motionPhoto: motion) : nil)
+        if var stored = livePhotoClips[clip.id] ?? allItems.first(where: { $0.id == clip.id }) {
+            var metadata = stored.metadata ?? MediaMetadata()
+            metadata.motionPhoto = motion
+            stored.metadata = metadata
+            if livePhotoClips[clip.id] != nil {
+                livePhotoClips[clip.id] = stored
+            } else if let index = allItems.firstIndex(where: { $0.id == clip.id }) {
+                allItems[index] = stored
+            }
+            try? await store?.save(stored)
+        }
+        return clip
+    }
+
+    /// The stills this launch has already tried to bring up to the convention.
+    private var livePhotoBackfillTried = Set<String>()
+
+    /// Brings Live Photos imported before the convention up to it: puts `motionPhoto` on each
+    /// still that links a clip and lacks it, and registers each linked clip not yet registered.
+    ///
+    /// Both conditions are read off the library, so a still that has been done is skipped without
+    /// bookkeeping and the pass costs nothing once a library is current. At most `limit` stills a
+    /// pass, each tried once a launch so a failing write doesn't loop; the rest wait for the next
+    /// load. The content identifier is left out — it is in the clip, and reading it means
+    /// downloading and decrypting every clip; the file-id link already pairs them everywhere.
+    ///
+    /// - Returns: how many stills were brought up to date.
+    @discardableResult
+    func backfillLivePhotoConvention(limit: Int = 25) async -> Int {
+        let registeredClipFiles = Set(livePhotoClips.values.map(\.fileID))
+            .union(allItems.filter { $0.kind == .video && !$0.isDriveOnly }.map(\.fileID))
+        let pending = allItems.filter { item in
+            guard item.kind == .photo, !item.isDriveOnly, let clipFile = item.liveVideoFileID,
+                  !livePhotoBackfillTried.contains(item.id) else { return false }
+            return item.metadata?.motionPhoto == nil || !registeredClipFiles.contains(clipFile)
+        }.prefix(limit)
+
+        var done = 0
+        for still in pending {
+            livePhotoBackfillTried.insert(still.id)
+            guard let clipFile = still.liveVideoFileID else { continue }
+            do {
+                if !registeredClipFiles.contains(clipFile) {
+                    // No whole-document fallback anywhere in here: a repair must never erase.
+                    try await registerLivePhotoClip(fileID: clipFile, motion: .livePhoto(),
+                                                    captureDate: still.captureDate,
+                                                    allowingWholeWrite: false)
+                }
+                if still.metadata?.motionPhoto == nil {
+                    let motion = MotionPhotoFacts.livePhoto()
+                    var metadata = still.metadata ?? MediaMetadata()
+                    metadata.motionPhoto = motion
+                    try await writeMetadata(
+                        id: still.id,
+                        patch: .object(["motionPhoto": try JSONValue(encoding: motion)]),
+                        whole: nil)
+                    if let index = allItems.firstIndex(where: { $0.id == still.id }) {
+                        allItems[index].metadata = metadata
+                        try? await store?.save(allItems[index])
+                    }
+                }
+                done += 1
+            } catch {
+                logger.error("live photo backfill failed for \(still.id, privacy: .public): \(error, privacy: .public)")
+            }
+        }
+        if done > 0 { logger.info("live photo backfill: \(done) brought up to the convention") }
+        return done
+    }
+
     /// Puts a single server copy of an item back into ``allItems``, keeping the metadata only this
     /// device holds. Answers what was actually stored, or nil if the item has since left the library.
     ///
     /// The case this exists for is narrow and easy to miss. Importing a favourited photograph fires
-    /// two writes at once: a `PATCH` setting the star, and a `PUT` attaching the metadata. The
+    /// two writes at once: a `PATCH` setting the star, and a second attaching the metadata. The
     /// `PATCH` response carries `metadata: null` — the server has not been told yet — so whichever
     /// of the two lands second wins, and half the time that is the one that blanks the record the
     /// other just wrote. Merging rather than assigning makes the order stop mattering.
@@ -871,7 +1000,7 @@ final class PhotoLibraryService: ObservableObject {
     ///
     /// Two requests, because the server keeps them in two places: the date is a column the timeline
     /// sorts on (`PATCH /photos/{id}`), and the title and caption live in the metadata document
-    /// (`PUT /photos/{id}/metadata`). Only the ones that changed are sent.
+    /// (`PATCH /photos/{id}/metadata`). Only the ones that changed are sent.
     ///
     /// - Parameters:
     ///   - title: nil or empty to remove it.
@@ -910,9 +1039,13 @@ final class PhotoLibraryService: ObservableObject {
                 record = updated
             }
             if textChanged {
+                // Only the two keys this edit is about; `null` removes one the user cleared.
+                let patch = JSONValue.object([
+                    "title": title.map(JSONValue.string) ?? .null,
+                    "caption": caption.map(JSONValue.string) ?? .null,
+                ])
                 let published = publishingLocation ? metadata : metadata.withoutLocation
-                _ = try await api.send(method: "PUT", path: "/api/v1/photos/\(record.id)/metadata",
-                                       json: published)
+                try await writeMetadata(id: record.id, patch: patch, whole: published)
             }
             // Re-applied by id: registering a Drive-only item swaps the record in under a new one.
             if let index = allItems.firstIndex(where: { $0.id == record.id }) {

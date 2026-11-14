@@ -341,10 +341,12 @@ final class DetailsEditTests: XCTestCase {
         XCTAssertEqual(patchJSON["captureDate"] as? String, "1998-07-04T15:30:00Z")
         XCTAssertNil(patchJSON["isStarred"], "an edit must not touch the favourite flag")
 
-        let put = try XCTUnwrap(MockURLProtocol.body(forPathContaining: "/metadata", method: "PUT"))
-        let putJSON = try XCTUnwrap(JSONSerialization.jsonObject(with: put) as? [String: Any])
-        XCTAssertEqual(putJSON["title"] as? String, "Fourth of July", "trimmed")
-        XCTAssertEqual(putJSON["caption"] as? String, "Fireworks")
+        let merge = try XCTUnwrap(MockURLProtocol.body(forPathContaining: "/metadata", method: "PATCH"))
+        let mergeJSON = try XCTUnwrap(JSONSerialization.jsonObject(with: merge) as? [String: Any])
+        XCTAssertEqual(mergeJSON["title"] as? String, "Fourth of July", "trimmed")
+        XCTAssertEqual(mergeJSON["caption"] as? String, "Fireworks")
+        XCTAssertEqual(Set(mergeJSON.keys), ["title", "caption"],
+                       "only what the edit is about — every other key on the record is kept")
 
         let edited = try XCTUnwrap(sut.item(id: "a"))
         XCTAssertEqual(edited.captureDate, newDate)
@@ -358,9 +360,12 @@ final class DetailsEditTests: XCTestCase {
         try await sut.editDetails(id: "a", captureDate: unchangedDate, title: "Only a title",
                                   caption: nil, publishingLocation: false)
 
-        XCTAssertNil(MockURLProtocol.request { $0.httpMethod == "PATCH" },
-                     "the date did not change, so it is not sent")
-        XCTAssertNotNil(MockURLProtocol.request { $0.httpMethod == "PUT" })
+        XCTAssertNil(MockURLProtocol.request {
+            $0.httpMethod == "PATCH" && $0.url?.path.hasSuffix("/metadata") == false
+        }, "the date did not change, so it is not sent")
+        let merge = try XCTUnwrap(MockURLProtocol.body(forPathContaining: "/metadata", method: "PATCH"))
+        let mergeJSON = try XCTUnwrap(JSONSerialization.jsonObject(with: merge) as? [String: Any])
+        XCTAssertTrue(mergeJSON["caption"] is NSNull, "a cleared caption is removed, not left behind")
     }
 
     func testAServerThatIgnoresTheDateIsReportedAndTheEditUndone() async throws {

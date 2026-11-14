@@ -116,6 +116,9 @@ struct MediaItem: Identifiable, Hashable {
     /// The paired video's Drive file, for a Live Photo whose motion this account holds.
     var liveVideoFileID: String? { metadata?.device?.liveVideoFileID }
 
+    /// The Live Photo's content identifier, where it was read — on either half.
+    var motionContentIdentifier: String? { metadata?.motionPhoto?.contentIdentifier }
+
     /// An image that is in Drive but has no photo record yet — see ``init(driveFile:)``.
     ///
     /// Anything that addresses the photo record has to register it first — see
@@ -251,10 +254,14 @@ struct MediaMetadata: Hashable, Codable {
     var title: String?
     /// A line or two the user wrote about it.
     var caption: String?
+    /// That this is half of a Live Photo, in the shape every Neutrino client reads — on the still
+    /// beside ``MediaDeviceFacts/liveVideoFileID``, and on the clip, which is registered too.
+    /// See `neutrino/agent_docs/live-photos.md`.
+    var motionPhoto: MotionPhotoFacts?
 
     init(width: Int? = nil, height: Int? = nil, format: String? = nil,
          exif: MediaExif? = nil, device: MediaDeviceFacts? = nil,
-         title: String? = nil, caption: String? = nil) {
+         title: String? = nil, caption: String? = nil, motionPhoto: MotionPhotoFacts? = nil) {
         self.width = width
         self.height = height
         self.format = format
@@ -262,6 +269,32 @@ struct MediaMetadata: Hashable, Codable {
         self.device = device
         self.title = title
         self.caption = caption
+        self.motionPhoto = motionPhoto
+    }
+}
+
+// MARK: - MotionPhotoFacts
+
+/// `metadata.motionPhoto`: the platform's record that an item is half of a motion photo — the
+/// same object the web writes at import and Drive iOS writes when it registers a Live Photo.
+struct MotionPhotoFacts: Hashable, Codable {
+    /// `live_photo_apple`, or the web's `motion_photo_google` for a single-file Motion Photo.
+    let subtype: String
+    /// What classified it — for this app, PhotoKit's say-so.
+    let signal: String
+    /// Apple's `com.apple.quicktime.content.identifier`, shared by the still and its clip.
+    var contentIdentifier: String?
+    /// Seconds into the clip of the frame the still was taken at.
+    var stillImageTime: Double?
+
+    static let appleSubtype = "live_photo_apple"
+    /// The signal Drive iOS writes too: the asset said `.photoLive`.
+    static let photoKitSignal = "PHAssetMediaSubtype.photoLive"
+
+    static func livePhoto(contentIdentifier: String? = nil,
+                          stillImageTime: Double? = nil) -> MotionPhotoFacts {
+        MotionPhotoFacts(subtype: appleSubtype, signal: photoKitSignal,
+                         contentIdentifier: contentIdentifier, stillImageTime: stillImageTime)
     }
 }
 
@@ -372,13 +405,14 @@ extension MediaMetadata {
     /// a server that can read nothing else about the picture.
     var withoutLocation: MediaMetadata {
         MediaMetadata(width: width, height: height, format: format,
-                      exif: exif?.withoutLocation, device: device, title: title, caption: caption)
+                      exif: exif?.withoutLocation, device: device, title: title, caption: caption,
+                      motionPhoto: motionPhoto)
     }
 
     /// True when nothing was extracted, so there is no reason to write or send it.
     var isEmpty: Bool {
         width == nil && height == nil && format == nil && (exif?.isEmpty ?? true) && device == nil
-            && title == nil && caption == nil
+            && title == nil && caption == nil && motionPhoto == nil
     }
 
     /// This record as the server sent it, with anything only *this device* holds folded back in.
@@ -410,7 +444,8 @@ extension MediaMetadata {
         return MediaMetadata(width: width ?? local.width, height: height ?? local.height,
                              format: format ?? local.format, exif: exif,
                              device: device ?? local.device,
-                             title: title, caption: caption)
+                             title: title, caption: caption,
+                             motionPhoto: motionPhoto)
     }
 }
 

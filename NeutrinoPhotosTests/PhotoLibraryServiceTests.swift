@@ -717,7 +717,10 @@ final class PhotoLibraryServiceTests: XCTestCase {
 
         XCTAssertEqual(sut.item(id: "a")?.metadata?.width, 4032)
 
-        let request = try XCTUnwrap(MockURLProtocol.request { $0.httpMethod == "PUT" })
+        // Merged, never written whole: a whole-document write erases keys other clients wrote.
+        let request = try XCTUnwrap(MockURLProtocol.request {
+            $0.httpMethod == "PATCH" && $0.url?.path.hasSuffix("/metadata") == true
+        })
         // A worker endpoint, and the only way an end-to-end encrypted photograph's EXIF can ever
         // reach the server: what it receives is ciphertext and the key never leaves the device.
         XCTAssertEqual(request.url?.path, "/api/v1/photos/a/metadata")
@@ -772,7 +775,7 @@ final class PhotoLibraryServiceTests: XCTestCase {
 
         await sut.setMetadata(MediaMetadata(), forPhoto: "a", publishingLocation: true)
 
-        XCTAssertNil(MockURLProtocol.request { $0.httpMethod == "PUT" })
+        XCTAssertNil(MockURLProtocol.request { $0.url?.path.hasSuffix("/metadata") == true })
         XCTAssertNil(sut.item(id: "a")?.metadata)
     }
 

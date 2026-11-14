@@ -87,6 +87,12 @@ struct ContentView: View {
         .onChange(of: photoLinks.pendingFileID) { _ in openPendingLink() }
         .onChange(of: library.lastLoadedAt) { _ in openPendingLink() }
         .onChange(of: library.isFillingIn) { _ in openPendingLink() }
+        // Once the whole library is read, bring any Live Photo from before the platform convention
+        // up to it — a capped pass that costs nothing once the library is current.
+        .onChange(of: library.isFillingIn) { filling in
+            guard !filling, !isImporting, library.lastLoadedAt != nil else { return }
+            Task { await library.backfillLivePhotoConvention() }
+        }
         .onAppear { openPendingLink() }
         .fullScreenCover(item: $linkedItem) { item in
             PhotoDetailView(items: [item], initialID: item.id)
@@ -96,6 +102,16 @@ struct ContentView: View {
         .sheet(isPresented: $showsLinkUnavailable) {
             PhotoLinkUnavailableView()
         }
+        // Coming back online is the fourth: whatever was loaded offline came from the cache, and a
+        // load that failed while offline left its error on screen. Not throttled — the stale check
+        // would skip a library last refreshed a minute ago, just before the connection dropped.
+        .onChange(of: monitor.isOnline) { online in
+            guard online, !isImporting else { return }
+            Task { await library.load() }
+        }
+        // Photos queues nothing made offline — an import waits for the network and says so in its
+        // own banner — so the strip only says what the library is showing.
+        .connectivityBanner(isOnline: monitor.isOnline, keepsChangesOffline: false)
     }
 
     // MARK: - Photo links
@@ -118,16 +134,6 @@ struct ContentView: View {
         guard library.lastLoadedAt != nil, !library.isFillingIn, !library.isLoading else { return }
         _ = photoLinks.consume()
         showsLinkUnavailable = true
-        // Coming back online is the fourth: whatever was loaded offline came from the cache, and a
-        // load that failed while offline left its error on screen. Not throttled — the stale check
-        // would skip a library last refreshed a minute ago, just before the connection dropped.
-        .onChange(of: monitor.isOnline) { online in
-            guard online, !isImporting else { return }
-            Task { await library.load() }
-        }
-        // Photos queues nothing made offline — an import waits for the network and says so in its
-        // own banner — so the strip only says what the library is showing.
-        .connectivityBanner(isOnline: monitor.isOnline, keepsChangesOffline: false)
     }
 
     // MARK: - Importing
