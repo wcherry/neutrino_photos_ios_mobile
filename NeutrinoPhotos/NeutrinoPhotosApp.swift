@@ -43,6 +43,8 @@ struct NeutrinoPhotosApp: App {
     @StateObject private var deviceBrowser: DeviceLibraryBrowser
     @StateObject private var keyFiles: KeyFileRouter
     @StateObject private var keyProvisioning = KeyProvisioningService()
+    /// `/open/photo/<file id>` links waiting to be opened — see ``PhotoLinkRouter``.
+    @StateObject private var photoLinks = PhotoLinkRouter()
     /// The one shared instance — see ``ExternalDisplayService`` for why it is.
     @StateObject private var externalDisplay = ExternalDisplayService.shared
 
@@ -146,6 +148,7 @@ struct NeutrinoPhotosApp: App {
                 .environmentObject(deviceLibrary)
                 .environmentObject(deviceBrowser)
                 .environmentObject(keyFiles)
+                .environmentObject(photoLinks)
                 .environmentObject(externalDisplay)
                 .preferredColorScheme(settings.theme.colorScheme)
                 .task { await configure() }
@@ -165,6 +168,10 @@ struct NeutrinoPhotosApp: App {
                     }
                 }
                 .onOpenURL { url in
+                    // A photo link first: it is an `https` URL, which the key-file handler would
+                    // only reject. Remembered even before sign-in, and opened once the library can
+                    // answer — see `ContentView`.
+                    if photoLinks.handle(url) { return }
                     // A `.json` key file AirDropped or tapped in Files. Declaring the document type
                     // in `project.yml` is what makes iOS offer this app; consuming the URL here is
                     // what makes tapping it do something.

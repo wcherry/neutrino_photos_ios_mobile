@@ -28,6 +28,7 @@ struct PhotoDetailView: View {
     @State private var showsChrome = true
     @State private var showsInfo = false
     @State private var showsAlbumPicker = false
+    @State private var sharing: ShareTarget?
     @State private var isSaving = false
     /// The one line the save reports, success or failure. An alert rather than a toast because
     /// "saved" and "couldn't save" are both worth being sure of, and a photo library is the sort of
@@ -70,6 +71,10 @@ struct PhotoDetailView: View {
                 MediaInfoView(item: current)
                     .environmentObject(settings)
             }
+        }
+        .sheet(item: $sharing) { target in
+            ShareExportSheet(items: target.items)
+                .environmentObject(content)
         }
         .sheet(isPresented: $showsAlbumPicker) {
             if let current {
@@ -168,6 +173,16 @@ struct PhotoDetailView: View {
                 }
             }
             Spacer()
+            // In the top bar rather than the bottom one: the bottom row is already as wide as
+            // a 320 pt screen allows.
+            Button {
+                if let current { sharing = ShareTarget(items: [current]) }
+            } label: {
+                Image(systemName: "square.and.arrow.up")
+                    .font(.title3)
+            }
+            .accessibilityLabel("Share")
+            .padding(.trailing, 12)
             Button {
                 showsInfo = true
             } label: {
