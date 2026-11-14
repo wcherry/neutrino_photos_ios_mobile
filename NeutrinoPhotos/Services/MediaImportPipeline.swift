@@ -142,9 +142,9 @@ final class MediaImportPipeline {
             library.setStarred(id: item.id, isStarred: true)
         }
 
-        var liveVideoFileID: String?
+        var liveMotion: LiveMotion?
         if device?.isLivePhoto == true, settings.importsLivePhotoMotion, let device {
-            liveVideoFileID = await uploadLiveMotion(for: item.fileID, device: device)
+            liveMotion = await uploadLiveMotion(for: item.fileID, device: device)
         }
 
         // Off the main actor: this is ImageIO parsing headers, which is fast but is not free and
@@ -152,12 +152,33 @@ final class MediaImportPipeline {
         let extracted = await Task.detached(priority: .userInitiated) {
             MediaMetadataExtractor.metadata(from: bytes)
         }.value
-        guard let metadata = MediaMetadataExtractor.merged(extracted, with: device,
-                                                            liveVideoFileID: liveVideoFileID) else {
+        guard var metadata = MediaMetadataExtractor.merged(extracted, with: device,
+                                                            liveVideoFileID: liveMotion?.fileID) else {
             return
         }
+        metadata.motionPhoto = liveMotion?.motion
         await library.setMetadata(metadata, forPhoto: item.id,
                                   publishingLocation: settings.publishesLocationMetadata)
+
+        // After the still names it, so the clip is claimed — set aside, never a second tile — from
+        // the moment it is registered. See `neutrino/agent_docs/live-photos.md`.
+        if let liveMotion {
+            do {
+                try await library.registerLivePhotoClip(fileID: liveMotion.fileID,
+                                                        motion: liveMotion.motion,
+                                                        captureDate: device?.creationDate)
+            } catch {
+                // The still links the clip either way, which is all this app needs to play it;
+                // the backfill registers it on a later load.
+                logger.error("live photo clip registration failed for \(liveMotion.fileID, privacy: .public): \(error, privacy: .public)")
+            }
+        }
+    }
+
+    /// A Live Photo's uploaded clip, and what it says about itself.
+    struct LiveMotion {
+        let fileID: String
+        let motion: MotionPhotoFacts
     }
 
     /// The video counterpart.
@@ -179,14 +200,18 @@ final class MediaImportPipeline {
     ///
     /// Answers the video's Drive file id, which is what ties the two together — it travels in the
     /// photo record's metadata, so any device that lists the library learns about the motion without
-    /// having to go looking for it in Drive.
-    private func uploadLiveMotion(for fileID: String, device: DeviceAsset) async -> String? {
+    /// having to go looking for it in Drive — and the clip's content identifier and still-image
+    /// time, read here because this is the only moment the clip is in the clear.
+    private func uploadLiveMotion(for fileID: String, device: DeviceAsset) async -> LiveMotion? {
         guard let deviceLibrary else { return nil }
         do {
             guard let url = try await deviceLibrary.writePairedVideo(
                 for: device.localIdentifier) else { return nil }
             defer { try? FileManager.default.removeItem(at: url) }
-            return try await content.uploadLivePhotoVideo(forOriginal: fileID, from: url)
+            let motion = await LivePhotoClipReader.motionPhoto(ofClipAt: url)
+            guard let clipFileID = try await content.uploadLivePhotoVideo(forOriginal: fileID,
+                                                                          from: url) else { return nil }
+            return LiveMotion(fileID: clipFileID, motion: motion)
         } catch {
             logger.error("live photo motion failed for \(fileID, privacy: .public): \(error, privacy: .public)")
             return nil

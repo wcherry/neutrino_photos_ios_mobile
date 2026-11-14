@@ -569,8 +569,9 @@ final class MediaContentService: ObservableObject {
     /// photograph; the still is already safe by the time this runs, and the record simply carries no
     /// ``MediaDeviceFacts/liveVideoFileID``.
     ///
-    /// Not registered as a photo, on purpose. The clip is half of an item the library already has,
-    /// and registering it would put two entries in the timeline for one thing the user photographed.
+    /// Registered as a photo afterwards, by the import pipeline, once the still names it — the
+    /// platform convention (`neutrino/agent_docs/live-photos.md`). The still's link is what keeps it
+    /// from being a second entry in the timeline; see ``PhotoLibraryService/allItems``.
     func uploadLivePhotoVideo(forOriginal fileID: String, from url: URL) async throws -> String? {
         guard let drive else { return nil }
         guard let folderID = try await drive.livePhotosFolderID() else { return nil }
