@@ -1,5 +1,6 @@
 import Sodium
 import XCTest
+import NeutrinoCrypto
 @testable import NeutrinoPhotos
 
 // MARK: - MediaCryptoTests
@@ -224,5 +225,50 @@ final class MediaCryptoTests: XCTestCase {
         (directory.appendingPathComponent("plain.bin"),
          directory.appendingPathComponent("cipher.bin"),
          directory.appendingPathComponent("recovered.bin"))
+    }
+
+    // MARK: - NEB1 and metadata-free reads (neutrino#318)
+
+    private func scratch(_ name: String) -> URL {
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("neb1-\(UUID().uuidString)-\(name)")
+        addTeardownBlock { try? FileManager.default.removeItem(at: url) }
+        return url
+    }
+
+    func testANEB1FileFromDriveOpensInMemoryAndStreamed() throws {
+        let dek = MediaCrypto.newDEK()
+        let original = Data((0..<20_000).map { UInt8(truncatingIfNeeded: $0 &* 31) })
+        let neb1 = try DriveFileCrypto.encryptNEB1(original, dek: dek, chunkSize: 4096)
+
+        XCTAssertEqual(Data(try MediaCrypto.decrypt(neb1, dek: dek)), original)
+
+        let source = scratch("in"), destination = scratch("out")
+        try neb1.write(to: source)
+        try MediaCrypto.decryptStream(from: source, to: destination, dek: dek)
+        XCTAssertEqual(try Data(contentsOf: destination), original)
+    }
+
+    func testALargeChunkedOriginalStreamsWithoutItsChunkSize() throws {
+        // What the download path now does when the metadata carries no chunk size: the 1 MiB
+        // framing this app writes is recognised from the bytes.
+        let dek = MediaCrypto.newDEK()
+        let original = Data((0..<(MediaCrypto.defaultChunkSize * 2 + 5)).map { UInt8(truncatingIfNeeded: $0) })
+        let source = scratch("plain"), encrypted = scratch("enc"), destination = scratch("out")
+        try original.write(to: source)
+        _ = try MediaCrypto.encryptStream(from: source, to: encrypted, dek: dek)
+
+        try MediaCrypto.decryptStream(from: encrypted, to: destination, dek: dek)
+        XCTAssertEqual(try Data(contentsOf: destination), original)
+    }
+
+    func testAFailedStreamLeavesNoPlaintextBehind() throws {
+        let dek = MediaCrypto.newDEK()
+        var neb1 = try DriveFileCrypto.encryptNEB1(Data(repeating: 7, count: 9000), dek: dek, chunkSize: 4096)
+        neb1[neb1.count - 1] ^= 1
+        let source = scratch("in"), destination = scratch("out")
+        try neb1.write(to: source)
+        XCTAssertThrowsError(try MediaCrypto.decryptStream(from: source, to: destination, dek: dek))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: destination.path))
     }
 }

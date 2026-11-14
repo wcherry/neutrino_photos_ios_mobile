@@ -1,6 +1,7 @@
 import PhotosUI
 import SwiftUI
 import NeutrinoCrypto
+import NeutrinoCore
 import NeutrinoUI
 
 // MARK: - LibraryView
@@ -14,6 +15,7 @@ import NeutrinoUI
 struct LibraryView: View {
 
     @EnvironmentObject private var library: PhotoLibraryService
+    @EnvironmentObject private var monitor: NetworkMonitor
     @EnvironmentObject private var settings: AppSettings
     /// Held for the bulk "Add to Album" action and handed on to its sheet.
     @EnvironmentObject private var albums: AlbumService
@@ -423,7 +425,16 @@ struct LibraryView: View {
                        systemImage: "exclamationmark.circle", tint: .red)
             }
             lockedBanner
-            if let error = library.error {
+            // A pull to refresh lets go once the newest page is in, but the rest of a large library
+            // is still being re-read behind it — and deletions only land when that finishes. Without
+            // this the walk was invisible, and its ending looked like a refresh nobody asked for.
+            if library.isRefreshing && library.error == nil && !selection.isActive {
+                banner("Checking for changes…", systemImage: "arrow.triangle.2.circlepath",
+                       tint: .secondary, accessory: .progress)
+            }
+            // Offline, the load failed for the reason the connectivity banner already gives, and it
+            // is reloaded on reconnect; a second, red, line saying so would only alarm.
+            if let error = library.error, monitor.isOnline {
                 // Tappable, which the plain banner was not. A refresh that failed leaves the only
                 // way back a pull on the grid — and the grid is empty in exactly the case the
                 // failure matters most, on a first launch that has nothing cached to pull on.

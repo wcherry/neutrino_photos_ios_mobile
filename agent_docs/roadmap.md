@@ -1060,15 +1060,16 @@ Covers mvp.md §5 Basic Search, §13 Metadata, §19 items 12, 13, 19.
 
 **Deliverables**
 
-- [ ] Local search index over filename, date, camera, lens, media type, album, favorite
-- [ ] Search UI with suggestions and recent searches
-- [ ] Date/month/year queries in natural forms ("June 2024", "2023", "last week")
-- [ ] Info sheet: date/time, location, camera, lens, exposure, ISO, aperture, focal length,
+- [x] Local search index over filename, date, camera, lens, media type, album, favorite
+- [x] Search UI with suggestions and recent searches
+- [x] Date/month/year queries in natural forms ("June 2024", "2023", "last week")
+- [x] Info sheet: date/time, location, camera, lens, exposure, ISO, aperture, focal length,
       file size, resolution, MIME type, filename
-- [ ] Metadata editing: date/time, title, caption
-- [ ] Search works fully offline against the local index
+- [x] Metadata editing: date/time, title, caption
+- [x] Search works fully offline against the local index
 
-**Flag:** `search`
+**Flag:** none — shipped live (wcherry/neutrino_photos_ios_mobile#21, wcherry/neutrino#239). The
+manual verification below is still owed on a device.
 
 **Manual verification**
 
@@ -1099,13 +1100,15 @@ Covers mvp.md §17, §19 items 18.
 **Deliverables**
 
 - [ ] Settings: Backup (enabled, Wi-Fi only, cellular, charging only, original vs optimized,
-      video settings)
-- [ ] Settings: Privacy (location processing, analytics, encryption status)
-- [ ] Settings: Storage (cloud usage, local cache usage, offline storage, clear cache,
+      video settings) — *partial:* Wi-Fi only and the upload format are shown; enabled, charging
+      only and video settings belong to automatic backup (Epic 7) and are not shown as switches
+      until it exists
+- [x] Settings: Privacy (location processing, analytics, encryption status)
+- [x] Settings: Storage (cloud usage, local cache usage, offline storage, clear cache,
       optimize storage)
-- [ ] Settings: Account (account, devices, encryption keys, sessions, storage plan)
-- [ ] Storage dashboard with a real breakdown by kind
-- [ ] "Optimize storage" — evict local originals that exist in the cloud
+- [x] Settings: Account (account, devices, encryption keys, sessions, storage plan)
+- [x] Storage dashboard with a real breakdown by kind
+- [x] "Optimize storage" — evict local originals that exist in the cloud
 
 **Flag:** none — Settings ships incrementally with the epics it configures.
 

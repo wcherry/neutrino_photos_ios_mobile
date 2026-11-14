@@ -1,5 +1,6 @@
 import Foundation
 import Sodium
+import NeutrinoCrypto
 
 // MARK: - MediaCrypto
 
@@ -101,48 +102,18 @@ enum MediaCrypto {
         return Data(stream.header() + ciphertext)
     }
 
-    /// Decrypts bytes produced by ``encrypt(_:dek:)`` or by the web client.
+    /// Decrypts a file body in any shape the platform writes — one push (the web, small files
+    /// here), the chunked shape this app writes for large originals, or NEB1 (Drive's chunked
+    /// format, neutrino#318) — through `DriveFileCrypto`, the one reader every app shares.
     ///
-    /// - Parameter chunkSize: the framing the file was written with, from its encrypted metadata.
-    ///   Nil — the common case — means one push covering the whole file.
+    /// - Parameter chunkSize: the framing from the file's encrypted metadata, when this app wrote
+    ///   it chunked. Nil for everything else; NEB1 describes itself.
     static func decrypt(_ data: Data, dek: Bytes, chunkSize: Int? = nil) throws -> Bytes {
-        guard data.count > headerBytes else {
+        do {
+            return Bytes(try DriveFileCrypto.decrypt(data, dek: dek, chunkSize: chunkSize))
+        } catch {
             throw MediaContentError.decryptionFailed
         }
-        let header = Bytes(data.prefix(headerBytes))
-        let body = data.dropFirst(headerBytes)
-        guard let pull = sodium.secretStream.xchacha20poly1305.initPull(secretKey: dek,
-                                                                       header: header) else {
-            throw MediaContentError.decryptionFailed
-        }
-
-        guard let chunkSize else {
-            guard let (plaintext, tag) = pull.pull(cipherText: Bytes(body)), tag == .FINAL else {
-                throw MediaContentError.decryptionFailed
-            }
-            return plaintext
-        }
-
-        var plaintext = Bytes()
-        plaintext.reserveCapacity(body.count)
-        var offset = body.startIndex
-        var sawFinal = false
-        while offset < body.endIndex {
-            let end = body.index(offset, offsetBy: chunkSize + chunkOverheadBytes,
-                                 limitedBy: body.endIndex) ?? body.endIndex
-            guard let (chunk, tag) = pull.pull(cipherText: Bytes(body[offset..<end])) else {
-                throw MediaContentError.decryptionFailed
-            }
-            plaintext.append(contentsOf: chunk)
-            offset = end
-            if tag == .FINAL { sawFinal = true; break }
-        }
-        // A stream that ran out of bytes without a FINAL tag was truncated. Each chunk
-        // authenticates itself, so nothing else would have complained.
-        guard sawFinal, offset == body.endIndex else {
-            throw MediaContentError.decryptionFailed
-        }
-        return plaintext
     }
 
     // MARK: - Streaming
@@ -188,41 +159,15 @@ enum MediaCrypto {
         return chunkSize
     }
 
-    /// Decrypts a file written by ``encryptStream(from:to:dek:chunkSize:)``, holding one chunk at a
-    /// time. `chunkSize` must be the value that encryption returned.
+    /// Decrypts the file at `source` into `destination` a chunk at a time, in any shape the
+    /// platform writes — this app's chunked originals (pass the `chunkSize` encryption returned,
+    /// or nil and it is recognised), NEB1 from Drive, or a single push — through `DriveFileCrypto`.
+    /// A failure leaves no partial plaintext at `destination`.
     static func decryptStream(from source: URL, to destination: URL, dek: Bytes,
-                              chunkSize: Int = defaultChunkSize) throws {
-        precondition(chunkSize > 0, "chunk size must be positive")
-
-        let input = try FileHandle(forReadingFrom: source)
-        defer { try? input.close() }
-
-        let header = try read(headerBytes, from: input)
-        guard header.count == headerBytes,
-              let pull = sodium.secretStream.xchacha20poly1305.initPull(secretKey: dek,
-                                                                       header: header) else {
-            throw MediaContentError.decryptionFailed
-        }
-
-        FileManager.default.createFile(atPath: destination.path, contents: nil)
-        guard let output = FileHandle(forWritingAtPath: destination.path) else {
-            throw MediaContentError.decryptionFailed
-        }
-        defer { try? output.close() }
-
-        var sawFinal = false
-        while true {
-            let ciphertext = try read(chunkSize + chunkOverheadBytes, from: input)
-            if ciphertext.isEmpty { break }
-            guard let (plaintext, tag) = pull.pull(cipherText: ciphertext) else {
-                throw MediaContentError.decryptionFailed
-            }
-            try write(plaintext, to: output)
-            if tag == .FINAL { sawFinal = true; break }
-        }
-        guard sawFinal else {
-            // The file ended before the stream did. Every chunk authenticated, so this is the only
-            // check that catches a download cut short.
+                              chunkSize: Int? = nil) throws {
+        do {
+            try DriveFileCrypto.decrypt(from: source, to: destination, dek: dek, chunkSize: chunkSize)
+        } catch {
             throw MediaContentError.decryptionFailed
         }
     }

@@ -350,15 +350,11 @@ final class MediaContentService: ObservableObject {
         let chunkSize = try await chunkSize(forFileID: item.fileID, dek: dek)
         try await api.download(path: "/api/v1/drive/files/\(item.fileID)", to: ciphertextURL)
 
+        // Streamed whatever the shape: this app's chunked originals by their metadata, NEB1 from
+        // Drive by its own header (neutrino#318), and a single push read whole, as before.
         try await Self.offMain {
-            if let chunkSize {
-                try MediaCrypto.decryptStream(from: ciphertextURL, to: plaintextURL, dek: dek,
-                                              chunkSize: chunkSize)
-            } else {
-                let ciphertext = try Data(contentsOf: ciphertextURL, options: .mappedIfSafe)
-                let plaintext = try MediaCrypto.decrypt(ciphertext, dek: dek)
-                try Data(plaintext).write(to: plaintextURL, options: .atomic)
-            }
+            try MediaCrypto.decryptStream(from: ciphertextURL, to: plaintextURL, dek: dek,
+                                          chunkSize: chunkSize)
         }
 
         guard let url = originals.adopt(fileAt: plaintextURL, forKey: key) else {
@@ -628,19 +624,54 @@ final class MediaContentService: ObservableObject {
 
     // MARK: - Cache
 
-    /// What the app has written to this device, broken down for the Settings screen.
+    /// What the app has written to this device, broken down for the storage dashboard.
     struct StorageBreakdown: Equatable {
+        /// Full-size decrypted originals, and Live Photo motion — what Optimize Storage removes.
         let originals: Int64
+        /// The 2048 px renditions the viewer opens on. Kept by Optimize Storage: they are what makes
+        /// opening a photograph fast, at about a tenth of the original's size.
+        let previews: Int64
         let thumbnails: Int64
         let database: Int64
+        /// The most the photo cache — originals and previews together — is allowed to hold before
+        /// the least recently used are dropped.
+        let cacheCapacity: Int64
 
-        var total: Int64 { originals + thumbnails + database }
+        var total: Int64 { originals + previews + thumbnails + database }
+        /// What clearing the cache would free.
+        var cached: Int64 { originals + previews + thumbnails }
     }
 
     func storageBreakdown() async -> StorageBreakdown {
-        StorageBreakdown(originals: originals.totalBytes(),
+        StorageBreakdown(originals: originals.totalBytes(whereFileName: { !Self.isRendition($0) }),
+                         previews: originals.totalBytes(whereFileName: Self.isRendition),
                          thumbnails: thumbnails.totalBytesOnDisk(),
-                         database: await store?.sizeOnDisk() ?? 0)
+                         database: await store?.sizeOnDisk() ?? 0,
+                         cacheCapacity: originals.capacityBytes)
+    }
+
+    /// Optimize Storage: removes every full-size original from this device and keeps the previews
+    /// and grid thumbnails, so the library still browses and opens quickly while the big files go.
+    ///
+    /// Safe by construction rather than by checking: nothing in this cache is the only copy of a
+    /// photograph. A file lands here either after it was downloaded from the account or after its
+    /// upload was confirmed (``cacheAfterUpload(fileID:data:fileName:mimeType:)``); uploads still in
+    /// flight are staged elsewhere and untouched. Zooming past the preview, playing a video or
+    /// saving to the device downloads the original again.
+    ///
+    /// - Returns: the bytes freed.
+    @discardableResult
+    func optimizeStorage() -> Int64 {
+        imageCache.removeAllObjects()
+        let freed = originals.removeAll(whereFileName: { !Self.isRendition($0) })
+        logger.debug("optimized storage, freed \(freed) bytes")
+        return freed
+    }
+
+    /// A cached rendition rather than an original — by the suffix ``MediaRendition`` gives it.
+    private static func isRendition(_ fileName: String) -> Bool {
+        fileName.hasSuffix(MediaRendition.preview.cacheKeySuffix)
+            || fileName.hasSuffix(MediaRendition.thumbnail.cacheKeySuffix)
     }
 
     /// Bytes of decrypted media currently held on disk.
