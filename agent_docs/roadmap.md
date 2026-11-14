@@ -1100,13 +1100,15 @@ Covers mvp.md §17, §19 items 18.
 **Deliverables**
 
 - [ ] Settings: Backup (enabled, Wi-Fi only, cellular, charging only, original vs optimized,
-      video settings)
-- [ ] Settings: Privacy (location processing, analytics, encryption status)
-- [ ] Settings: Storage (cloud usage, local cache usage, offline storage, clear cache,
+      video settings) — *partial:* Wi-Fi only and the upload format are shown; enabled, charging
+      only and video settings belong to automatic backup (Epic 7) and are not shown as switches
+      until it exists
+- [x] Settings: Privacy (location processing, analytics, encryption status)
+- [x] Settings: Storage (cloud usage, local cache usage, offline storage, clear cache,
       optimize storage)
-- [ ] Settings: Account (account, devices, encryption keys, sessions, storage plan)
-- [ ] Storage dashboard with a real breakdown by kind
-- [ ] "Optimize storage" — evict local originals that exist in the cloud
+- [x] Settings: Account (account, devices, encryption keys, sessions, storage plan)
+- [x] Storage dashboard with a real breakdown by kind
+- [x] "Optimize storage" — evict local originals that exist in the cloud
 
 **Flag:** none — Settings ships incrementally with the epics it configures.
 

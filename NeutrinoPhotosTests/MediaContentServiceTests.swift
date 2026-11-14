@@ -244,7 +244,32 @@ final class MediaContentServiceTests: XCTestCase {
         XCTAssertGreaterThanOrEqual(breakdown.originals, 4096)
         XCTAssertGreaterThan(breakdown.database, 0)
         XCTAssertEqual(breakdown.total,
-                       breakdown.originals + breakdown.thumbnails + breakdown.database)
+                       breakdown.originals + breakdown.previews + breakdown.thumbnails
+                           + breakdown.database)
+    }
+
+    func testOptimizingRemovesOriginalsAndKeepsPreviews() async throws {
+        let item = Fixture.item(fileID: "file-o")
+        let original = try XCTUnwrap(
+            originals.store(Data(repeating: 1, count: 8192),
+                            forKey: MediaContentService.originalCacheKey(for: item)))
+        let preview = try XCTUnwrap(
+            originals.store(Data(repeating: 2, count: 1024),
+                            forKey: MediaContentService.cacheKey(for: item, rendition: .preview)))
+
+        let before = await sut.storageBreakdown()
+        XCTAssertEqual(before.originals, 8192)
+        XCTAssertEqual(before.previews, 1024)
+
+        let freed = sut.optimizeStorage()
+
+        XCTAssertEqual(freed, 8192)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: original.path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: preview.path),
+                      "the preview is what keeps opening a photo fast")
+        let after = await sut.storageBreakdown()
+        XCTAssertEqual(after.originals, 0)
+        XCTAssertEqual(after.previews, 1024)
     }
 
     // MARK: - Previews
