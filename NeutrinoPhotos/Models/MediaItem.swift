@@ -52,9 +52,12 @@ struct MediaItem: Identifiable, Hashable {
     let thumbnailURL: String?
     var isStarred: Bool
     var isArchived: Bool
-    /// When the picture was taken, where that is known — from EXIF at upload time. Nil for an item
-    /// whose uploader never supplied one.
-    let captureDate: Date?
+    /// When the picture was taken, where that is known — from EXIF at upload time, or as corrected
+    /// by the user in the info sheet. Nil for an item whose uploader never supplied one.
+    ///
+    /// `var` for that correction, which is applied on the device before the server confirms it so
+    /// the timeline moves the photograph at once.
+    var captureDate: Date?
     let createdAt: Date
     var updatedAt: Date
     /// When the item was moved to Recently Deleted, or nil while it is live.
@@ -244,14 +247,21 @@ struct MediaMetadata: Hashable, Codable {
     /// What the device's photo library knew and the pixels do not say. Absent for anything the
     /// server extracted, and for an import made without photo-library access.
     var device: MediaDeviceFacts?
+    /// A name the user gave the photograph, in place of the file name — Epic 11's metadata editing.
+    var title: String?
+    /// A line or two the user wrote about it.
+    var caption: String?
 
     init(width: Int? = nil, height: Int? = nil, format: String? = nil,
-         exif: MediaExif? = nil, device: MediaDeviceFacts? = nil) {
+         exif: MediaExif? = nil, device: MediaDeviceFacts? = nil,
+         title: String? = nil, caption: String? = nil) {
         self.width = width
         self.height = height
         self.format = format
         self.exif = exif
         self.device = device
+        self.title = title
+        self.caption = caption
     }
 }
 
@@ -362,12 +372,13 @@ extension MediaMetadata {
     /// a server that can read nothing else about the picture.
     var withoutLocation: MediaMetadata {
         MediaMetadata(width: width, height: height, format: format,
-                      exif: exif?.withoutLocation, device: device)
+                      exif: exif?.withoutLocation, device: device, title: title, caption: caption)
     }
 
     /// True when nothing was extracted, so there is no reason to write or send it.
     var isEmpty: Bool {
         width == nil && height == nil && format == nil && (exif?.isEmpty ?? true) && device == nil
+            && title == nil && caption == nil
     }
 
     /// This record as the server sent it, with anything only *this device* holds folded back in.
@@ -398,7 +409,8 @@ extension MediaMetadata {
         }
         return MediaMetadata(width: width ?? local.width, height: height ?? local.height,
                              format: format ?? local.format, exif: exif,
-                             device: device ?? local.device)
+                             device: device ?? local.device,
+                             title: title, caption: caption)
     }
 }
 

@@ -158,7 +158,7 @@ struct PhotoDetailView: View {
             }
             Spacer()
             VStack(spacing: 2) {
-                Text(current?.displayName ?? "")
+                Text(current?.metadata?.title ?? current?.displayName ?? "")
                     .font(.subheadline.weight(.medium))
                     .lineLimit(1)
                 if let date = current?.timelineDate {
