@@ -350,15 +350,11 @@ final class MediaContentService: ObservableObject {
         let chunkSize = try await chunkSize(forFileID: item.fileID, dek: dek)
         try await api.download(path: "/api/v1/drive/files/\(item.fileID)", to: ciphertextURL)
 
+        // Streamed whatever the shape: this app's chunked originals by their metadata, NEB1 from
+        // Drive by its own header (neutrino#318), and a single push read whole, as before.
         try await Self.offMain {
-            if let chunkSize {
-                try MediaCrypto.decryptStream(from: ciphertextURL, to: plaintextURL, dek: dek,
-                                              chunkSize: chunkSize)
-            } else {
-                let ciphertext = try Data(contentsOf: ciphertextURL, options: .mappedIfSafe)
-                let plaintext = try MediaCrypto.decrypt(ciphertext, dek: dek)
-                try Data(plaintext).write(to: plaintextURL, options: .atomic)
-            }
+            try MediaCrypto.decryptStream(from: ciphertextURL, to: plaintextURL, dek: dek,
+                                          chunkSize: chunkSize)
         }
 
         guard let url = originals.adopt(fileAt: plaintextURL, forKey: key) else {
